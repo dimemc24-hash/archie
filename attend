@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Attended Stage 1/4 session on DO (dev profile: Opus@high), guarded by the collision lock.
+# Usage: ./attend [extra hermes chat args]
+exec "$HOME/harness/do-lock.sh" attend bash -lc 'exec hermes -p dev chat "$@"' _ "$@"

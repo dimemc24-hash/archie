@@ -1,0 +1,24 @@
+# --- NewChapter clone (its own repo; ~1.1G) ---
+repo/
+
+# --- secrets: NEVER commit (none live here, but be absolute) ---
+.env
+*.env
+auth.json
+*.key
+*.pem
+id_rsa*
+*secret*
+*token*
+
+# --- runtime / generated ---
+artifacts/
+locks/
+__pycache__/
+*.pyc
+*.log
+*.err
+.stage4_seen
+
+# --- manual backups (git replaces these) ---
+*.bak*
