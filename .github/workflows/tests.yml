@@ -1,0 +1,19 @@
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q pytest fastapi
+      - name: py_compile everything
+        run: python -m py_compile $(git ls-files '*.py')
+      - name: harness-control + plugin tests
+        run: python -m pytest skills/harness-control/test_wrappers.py dashboard-plugins/test_plugin_apis.py -q
+      # port/test_port.py joins once the pre-existing spendToday failure is fixed
