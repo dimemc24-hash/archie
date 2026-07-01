@@ -19,8 +19,18 @@ Key invariants (do not break):
     with a Telegram- or SSH-triggered one. A busy lock surfaces as a clear
     "already running" message (do-lock.sh exits 75 / EX_TEMPFAIL), not a crash.
   * --dry-run never mutates anything: it prints the exact command that WOULD run.
-  * Stage 4 (review/merge) NEVER auto-merges. It requires an explicit
-    confirmation gate; without it, it only fetches + summarises the fix branch.
+  * Stage 4 (review/merge) NEVER auto-merges in a single call. It uses a
+    two-step dry-run/apply split: the default (no --apply) call fetches the fix
+    branch, computes a diff/artifact summary, and writes a pending-merge marker
+    file keyed to the run/branch/SHA — it never merges. A second call, invoked
+    only with an explicit --apply flag, reads that marker, re-validates it still
+    matches the current branch state (refusing a stale/mismatched marker),
+    performs the merge to main, and drops _harness/. No interactive prompt and
+    no bare --confirm flag. The split forces a hard boundary between 'summarise'
+    and 'mutate' as two separate tool invocations and produces a concrete
+    artifact (the marker) that documents what was reviewed and when, giving a
+    wrapping orchestration/policy layer a real point to inspect before the
+    second call happens.
   * Nothing here clones or writes to ~/harness/repo beyond what the wrapped script
     already does.
 """
@@ -33,6 +43,7 @@ import sys
 HARNESS = os.path.expanduser("~/harness")
 REPO = os.path.join(HARNESS, "repo")
 ARTIFACTS = os.path.join(HARNESS, "artifacts")
+PROFILES_DIR = os.path.join(HARNESS, "profiles")
 DO_LOCK = os.path.join(HARNESS, "do-lock.sh")
 ALERT = os.path.join(HARNESS, "alert.sh")
 
@@ -48,6 +59,39 @@ TRANSPORT = os.path.join(HARNESS, "transport.sh")
 
 # do-lock.sh exit code when the lock is already held (BSD EX_TEMPFAIL).
 LOCK_BUSY = 75
+
+
+def resolve_repo(profile):
+    """Resolve the target repo checkout for this run.
+
+    No --profile (None) preserves the exact legacy behavior: ~/harness/repo, the
+    NewChapter checkout, untouched. A named profile gets its own workspace under
+    ~/harness/workspaces/<profile>/repo, cloned on first use, so a non-NewChapter
+    build never shares a working tree with (or risks colliding with) the
+    NewChapter checkout. Same contract as emit_spec.py / stage2_build.py's
+    resolve_repo — duplicated there because those are independently-invoked
+    scripts; centralized here for the skills that have no underlying script to
+    delegate to (run_stage4).
+    """
+    if not profile:
+        return REPO
+    cfg_path = os.path.join(PROFILES_DIR, f"{profile}.json")
+    try:
+        import json
+        cfg = json.load(open(cfg_path))
+    except Exception as e:
+        die(f"unknown profile '{profile}': cannot read {cfg_path}: {e}")
+        raise  # die() exits, but keep the analyzer happy
+    workspace = os.path.expanduser(cfg["workspace"])
+    if not os.path.isdir(os.path.join(workspace, ".git")):
+        os.makedirs(os.path.dirname(workspace), exist_ok=True)
+        rc = subprocess.run(
+            ["git", "clone", cfg["repo_url"], workspace], cwd=HARNESS,
+            capture_output=True, text=True,
+        )
+        if rc.returncode:
+            die(f"failed to clone {cfg['repo_url']} into {workspace}: {rc.stderr}")
+    return workspace
 
 
 def eprint(*a):
@@ -121,8 +165,8 @@ def _shq(s: str) -> str:
 
 
 __all__ = [
-    "HARNESS", "REPO", "ARTIFACTS", "DO_LOCK", "ALERT",
+    "HARNESS", "REPO", "ARTIFACTS", "PROFILES_DIR", "DO_LOCK", "ALERT",
     "EMIT_SPEC", "STAGE2", "TRANSPORT", "LOCK_BUSY",
-    "eprint", "die", "require_file", "alert",
+    "eprint", "die", "require_file", "alert", "resolve_repo",
     "with_lock", "run_direct",
 ]

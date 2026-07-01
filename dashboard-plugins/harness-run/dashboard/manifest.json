@@ -1,0 +1,13 @@
+{
+  "name": "harness-run",
+  "label": "Harness Run",
+  "description": "Live view of the 4-stage dev harness: current run state, checkpoint log, burn log, and build artifacts for the active or most recent run.",
+  "icon": "Activity",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/harness-run",
+    "position": "after:skills"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

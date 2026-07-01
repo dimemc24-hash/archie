@@ -1,0 +1,13 @@
+{
+  "name": "router-ledger",
+  "label": "Router Ledger",
+  "description": "Cost ledger for the harness model router: spend by role/model vs the $25/day OpenRouter cap, circuit-breaker state, and per-entry cost log.",
+  "icon": "Wallet",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/router-ledger",
+    "position": "after:swarm-hetzner"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

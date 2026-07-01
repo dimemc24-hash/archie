@@ -1,0 +1,13 @@
+{
+  "name": "swarm-hetzner",
+  "label": "Swarm / Hetzner",
+  "description": "Swarm box liveness (via hetzner_power.sh) + swarm-report.json and fix-log.json from the active or most recent fix branch \u2014 build\u2192swarm status, fixes committed, wave results, and findings.",
+  "icon": "Server",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/swarm-hetzner",
+    "position": "after:harness-run"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
