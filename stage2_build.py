@@ -39,8 +39,12 @@ SENT_CP   = re.compile(r"CHECKPOINT_REACHED:\s*([A-Za-z0-9_.-]+)")
 SENT_DONE = re.compile(r"BUILD_COMPLETE")
 REQ_CP_KEYS = {"id", "trigger", "question", "on_synthesis"}
 
-def run(cmd, cwd, timeout=1800):
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+def run(cmd, cwd, timeout=5400):
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode(errors="ignore") if e.stdout else "")
+        return 124, out, f"SEGMENT-TIMEOUT after {timeout}s"
     return p.returncode, p.stdout, p.stderr
 
 def _hbase():
@@ -52,7 +56,7 @@ def newest_sid(cwd):
     lines = [l for l in out.splitlines() if l.strip()]
     return lines[-1].split()[-1] if lines else None
 
-def hermes_segment(prompt, model, cwd, resume_sid=None, timeout=1800, ledger=None, role="codex"):
+def hermes_segment(prompt, model, cwd, resume_sid=None, timeout=5400, ledger=None, role="codex"):
     cmd = _hbase() + (["--resume", resume_sid] if resume_sid else [])
     cmd += ["-z", prompt, *HEADLESS, "-m", model, *PROV]
     rc, out, err = run(cmd, cwd, timeout=timeout)
