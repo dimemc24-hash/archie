@@ -375,13 +375,11 @@ def do_apply(run_id: str, repo_dir: str, base: str, dry_run: bool) -> int:
         if os.path.isdir(run_harness):
             _git_ok(["rm", "-r", "--ignore-unmatch",
                      f"_harness/{run_id}"], repo_dir)
-        # Also clean any top-level _harness stubs from this merge.
-        remaining = os.listdir(harness_dir)
-        if not remaining:
+        # git rm prunes _harness/ itself when <run-id> was its only entry,
+        # so the dir may already be gone here (the common single-run case).
+        if os.path.isdir(harness_dir) and not os.listdir(harness_dir):
             os.rmdir(harness_dir)
-            _git_ok(["add", "-A"], repo_dir)
-        else:
-            _git_ok(["add", "-A"], repo_dir)
+        _git_ok(["add", "-A"], repo_dir)
         if _has_staged_changes(repo_dir):
             _git_ok(
                 ["commit", "-m",
