@@ -25,7 +25,8 @@ import harness_routing as hr  # noqa: E402
 import harness_ledger as hl   # noqa: E402
 import harness_redzone as hz  # noqa: E402
 
-REPO      = os.path.join(HARNESS, "repo")
+REPO      = os.path.join(HARNESS, "repo")  # default (legacy/no --profile): the NewChapter checkout
+PROFILES_DIR = os.path.join(HARNESS, "profiles")
 ARTIFACTS = os.path.join(HARNESS, "artifacts")
 PROV      = ["--provider", "openrouter"]
 HEADLESS  = ["--pass-session-id", "--yolo", "--accept-hooks"]
@@ -182,8 +183,30 @@ def core_loop(build_prompt, manifest, model, preset, work_dir, art_dir, max_segm
     burn.close()
     return cklog, seg
 
-def git(args, cwd=REPO):
-    return run(["git", *args], cwd, timeout=300)
+def git(args, cwd=None):
+    # cwd resolved at CALL time (not def time) so a --profile reassigning the global REPO earlier
+    # in real_run() is honored — a bare `cwd=REPO` default would freeze the module-load-time value.
+    return run(["git", *args], cwd if cwd is not None else REPO, timeout=300)
+
+def resolve_repo(profile):
+    """Resolve the target repo checkout for this run. No --profile (None) preserves the exact
+    legacy behavior: ~/harness/repo, the NewChapter checkout, untouched. A named profile gets its
+    own workspace under ~/harness/workspaces/<profile>/repo, cloned on first use, so a non-NewChapter
+    build never shares a working tree with (or risks colliding with) the NewChapter checkout."""
+    if not profile:
+        return os.path.join(HARNESS, "repo")
+    cfg_path = os.path.join(PROFILES_DIR, f"{profile}.json")
+    try:
+        cfg = json.load(open(cfg_path))
+    except Exception as e:
+        raise SystemExit(f"[stage2] unknown profile '{profile}': cannot read {cfg_path}: {e}")
+    workspace = os.path.expanduser(cfg["workspace"])
+    if not os.path.isdir(os.path.join(workspace, ".git")):
+        os.makedirs(os.path.dirname(workspace), exist_ok=True)
+        rc, _, err = run(["git", "clone", cfg["repo_url"], workspace], HARNESS)
+        if rc:
+            raise SystemExit(f"[stage2] failed to clone {cfg['repo_url']} into {workspace}: {err}")
+    return workspace
 
 def _changed_files(cwd, base_ref):
     # Files changed base_ref..HEAD, for red-zone detection (REVIEW §3.3). Empty on non-repo/error.
@@ -192,8 +215,10 @@ def _changed_files(cwd, base_ref):
         return []
     return [l.strip() for l in names.splitlines() if l.strip()]
 
-def real_run(run_id, base, model, preset, max_segments):
-    global PROFILE; PROFILE = "hivemind"   # real builds run Opus@xhigh via the hivemind profile
+def real_run(run_id, base, model, preset, max_segments, repo_profile=None):
+    global PROFILE, REPO
+    PROFILE = "hivemind"   # real builds run Opus@xhigh via the hivemind profile
+    REPO = resolve_repo(repo_profile)  # must happen BEFORE any git()/checkout below
     spec_branch = f"harness/spec/{run_id}"
     art = os.path.join(ARTIFACTS, run_id); os.makedirs(art, exist_ok=True)
     git(["fetch", "origin", spec_branch])
@@ -258,10 +283,12 @@ def main():
     ap.add_argument("--run-id"); ap.add_argument("--base", default="main")
     ap.add_argument("--model", default=BUILD_MODEL); ap.add_argument("--preset", default=None)
     ap.add_argument("--max-segments", type=int, default=40); ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--profile", default=None,
+                     help="target repo profile (profiles/<name>.json); omit for the legacy NewChapter checkout")
     a = ap.parse_args()
     if a.smoke: sys.exit(smoke())
     if not a.run_id: ap.error("--run-id required (or --smoke)")
-    sys.exit(real_run(a.run_id, a.base, a.model, a.preset, a.max_segments))
+    sys.exit(real_run(a.run_id, a.base, a.model, a.preset, a.max_segments, a.profile))
 
 if __name__ == "__main__":
     main()
