@@ -32,7 +32,7 @@ def or_key():
     return json.load(open(AUTH))["credential_pool"]["openrouter"][0]["access_token"]
 
 def opus(system, user, max_tokens=3500):
-    body = json.dumps({"model": "anthropic/claude-opus-4.8", "max_tokens": max_tokens, "temperature": 0.3,
+    body = json.dumps({"model": "anthropic/claude-sonnet-5", "max_tokens": max_tokens, "temperature": 0.3,
                        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}).encode()
     req = urllib.request.Request(OR_URL, data=body, headers={
         "Authorization": "Bearer " + or_key(), "Content-Type": "application/json",
