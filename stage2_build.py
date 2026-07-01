@@ -162,7 +162,20 @@ def core_loop(build_prompt, manifest, model, preset, work_dir, art_dir, max_segm
             seg += 1; continue
         cid = m.group(1); cp = cp_by_id.get(cid)
         pre = "budget" if (preset == "budget" or (cp or {}).get("panel_override") == "budget") else None
-        if not cp:
+        if cid in consulted:
+            # DEDUPE (runbook §5 known gap): re-emitting an already-consulted checkpoint
+            # used to re-run the council — duplicated spend and an opening for the council
+            # to expand scope. The decision is already made: re-inject it instead.
+            prior = next((e for e in reversed(cklog)
+                          if e.get("checkpoint") == cid and e.get("synthesis")), None)
+            lb(f"seg {seg}: checkpoint '{cid}' already consulted -> DEDUPE (no council call)")
+            cklog.append({"checkpoint": cid, "deduped": True, "resumed_sid": sid})
+            json.dump(cklog, open(os.path.join(art_dir, "checkpoint-log.json"), "w"), indent=2)
+            inject = (f"""Checkpoint '{cid}' was ALREADY consulted. PRIOR COUNCIL DECISION (binding, unchanged):
+{(prior or {}).get('synthesis', '(see checkpoint-log.json)')}
+Do NOT re-open this decision or re-emit CHECKPOINT_REACHED:{cid}. Apply it and continue. {roster()}
+At the next checkpoint emit CHECKPOINT_REACHED:<id> and stop; when ALL required checkpoints are done and the build is complete, emit BUILD_COMPLETE.""")
+        elif not cp:
             # #2 honor unknown: the agent self-identified a decision not in the manifest — consult anyway
             # (its instinct is signal) and flag the manifest gap for the Checkpoint Filter / Stage-1 review.
             lb(f"seg {seg}: UNKNOWN checkpoint '{cid}' -> consulting anyway (manifest gap)")
