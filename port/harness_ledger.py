@@ -40,19 +40,23 @@ from typing import Optional
 
 # ── price table (router.config.json → priceTable) ───────────────────────────
 # USD per 1M tokens. Unknown model → 0 (ledger.ts line 105).
+# Verified live against openrouter.ai/api/v1/models on 2026-07-01.
 PRICE_TABLE: dict[str, dict[str, float]] = {
-    "z-ai/glm-5.2":                 {"in": 1.40,  "out": 4.40},
+    "z-ai/glm-5.2":                 {"in": 0.93,  "out": 3.00},
+    "z-ai/glm-4.6v":                {"in": 0.30,  "out": 0.90},
     "openai/gpt-5.3-codex":         {"in": 1.75,  "out": 14.00},
     "openai/gpt-5.5":               {"in": 5.00,  "out": 30.00},
     "openai/gpt-4o":                {"in": 2.50,  "out": 10.00},
     "openai/gpt-4o-mini":           {"in": 0.15,  "out": 0.60},
-    "deepseek/deepseek-v4-pro":     {"in": 0.44,  "out": 0.87},
+    "deepseek/deepseek-v4-pro":     {"in": 0.43,  "out": 0.87},
     "deepseek/deepseek-chat":       {"in": 0.20,  "out": 0.80},
-    "moonshotai/kimi-k2.6":         {"in": 0.66,  "out": 3.41},
+    "moonshotai/kimi-k2.6":         {"in": 0.55,  "out": 3.20},
     "google/gemini-3.5-flash":      {"in": 1.50,  "out": 9.00},
     "anthropic/claude-sonnet-4.6":  {"in": 3.00,  "out": 15.00},
+    "anthropic/claude-sonnet-5":    {"in": 2.00,  "out": 10.00},
     "anthropic/claude-opus-4.6":    {"in": 5.00,  "out": 25.00},
     "anthropic/claude-opus-4.8":    {"in": 5.00,  "out": 25.00},
+    "openai/gpt-oss-120b:free":     {"in": 0.0,   "out": 0.0},
     "sakana/fugu":                  {"in": 0.0,   "out": 0.0},
     "sakana/fugu-ultra":            {"in": 5.00,  "out": 30.00},
 }
