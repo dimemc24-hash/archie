@@ -38,7 +38,7 @@ from typing import Optional
 MODEL_TIERS = {
     "cheap":    "z-ai/glm-5.2",
     "standard": "anthropic/claude-sonnet-4.6",
-    "premium":  "anthropic/claude-opus-4.8",
+    "premium":  "anthropic/claude-sonnet-5",
 }
 
 # Ordered ladder (index 0 = cheapest). Escalation moves right; the default
