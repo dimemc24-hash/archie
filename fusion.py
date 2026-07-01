@@ -17,7 +17,7 @@ AUTH_JSON = os.path.expanduser("~/.hermes/auth.json")
 PANEL_FULL   = ["deepseek/deepseek-v4-pro", "moonshotai/kimi-k2.6", "z-ai/glm-5.2", "openai/gpt-5.5"]
 PANEL_BUDGET = ["openai/gpt-4o", "moonshotai/kimi-k2.6", "deepseek/deepseek-v4-pro"]
 JUDGE = "google/gemini-3.5-flash"
-SYNTH_FULL   = "anthropic/claude-opus-4.6"
+SYNTH_FULL   = "anthropic/claude-sonnet-5"  # was opus-4.6 ($5in/$25out); sonnet-5 is $2in/$10out, newer gen
 SYNTH_BUDGET = "anthropic/claude-sonnet-4.6"
 
 def _key():
