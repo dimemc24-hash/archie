@@ -284,16 +284,22 @@ check_close("spendTodayUsd codex", l1.spend_today_usd("codex"), 3.93)
 check_close("spendTodayUsd planner (0)", l1.spend_today_usd("planner"), 0.0)
 
 print("== ledger — spend scoped to UTC day (ledger.test.ts:64-72) ==")
+import datetime as _dt
 t = [0.0]
 def clk(): return t[0]
 l2 = hl.Ledger(now=clk)
-# Set a fixed day via the now callable (epoch ms)
-import datetime
-t[0] = datetime.datetime(2026, 6, 25, 23, 0, 0).timestamp() * 1000
+# Set a fixed day via the now callable (epoch ms).  Datetimes are constructed
+# with explicit tzinfo=timezone.utc so .timestamp() yields the correct epoch
+# regardless of the host's local timezone or DST.  Without this, a naive
+# datetime is interpreted as local time and the day-boundary test is
+# non-deterministic: on a UTC-5 host both timestamps would land on the same
+# UTC day, flipping the assertion.
+_utc = _dt.timezone.utc
+t[0] = _dt.datetime(2026, 6, 25, 23, 0, 0, tzinfo=_utc).timestamp() * 1000
 l2.charge("z-ai/glm-5.2", {"prompt_tokens": 1_000_000, "completion_tokens": 0}, role="codex", cost_usd=1.40)
 check_close("spendToday same day", l2.spend_today_usd(), 1.40)
-# advance to next UTC day
-t[0] = datetime.datetime(2026, 6, 26, 1, 0, 0).timestamp() * 1000
+# advance to next UTC day (cross UTC midnight)
+t[0] = _dt.datetime(2026, 6, 26, 1, 0, 0, tzinfo=_utc).timestamp() * 1000
 check_close("spendToday next day = 0", l2.spend_today_usd(), 0.0)
 
 print("== ledger — guardrails (ledger.test.ts:75-131) ==")

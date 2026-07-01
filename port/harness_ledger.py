@@ -31,6 +31,7 @@ ships with). A Ledger can be constructed with overrides for testing.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import math
 import os
@@ -181,9 +182,23 @@ class Ledger:
 
     @staticmethod
     def _utc_day(ts: float) -> str:
-        """UTC YYYY-MM-DD (ledger.ts utcDay, lines 62-64)."""
-        import datetime
-        return datetime.datetime.utcfromtimestamp(ts / 1000.0).strftime("%Y-%m-%d")
+        """UTC YYYY-MM-DD (ledger.ts utcDay, lines 62-64).
+
+        Uses explicit tz-aware datetime construction (timezone.utc) so the
+        day boundary is always UTC midnight regardless of the host's local
+        timezone or DST rules. This is intentional: the circuit-breaker's
+        per-day cap resets on UTC-day boundaries, which aligns with
+        OpenRouter's own cost-reset clock, preventing double-counting edge
+        cases. Existing stored YYYY-MM-DD values remain valid because they
+        were always written with UTC-day semantics.
+
+        Note: datetime.utcfromtimestamp is deprecated in Python 3.12+ and
+        returns a naive datetime; fromtimestamp(ts, tz=utc) is the
+        correct, forward-compatible replacement.
+        """
+        return datetime.datetime.fromtimestamp(
+            ts / 1000.0, tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%d")
 
     # ── spend queries (ledger.ts spendTodayUsd, lines 146-154) ─────────────
     def spend_today_usd(self, role: Optional[str] = None) -> float:
