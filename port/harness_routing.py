@@ -36,7 +36,7 @@ from typing import Optional
 # slugs; escalation climbs cheap → standard → premium. The base_model argument
 # selects which tier the run starts on (Opus for real builds, glm-5.2 for smoke).
 MODEL_TIERS = {
-    "cheap":    "deepseek/deepseek-v4-pro",  # TEMP 2026-07-02: z-ai upstream outage; revert to z-ai/glm-5.2 when Z.AI recovers
+    "cheap":    "z-ai/glm-5.2",
     "standard": "deepseek/deepseek-v4-pro",  # Morley 2026-07-02: NO Anthropic via OpenRouter in the build/escalation path — Claude Code subagents only
     "premium":  "deepseek/deepseek-v4-pro",  # (same rule; judge/synthesis layers keep their carve-out in fusion.py)
 }
