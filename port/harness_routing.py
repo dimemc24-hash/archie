@@ -36,7 +36,7 @@ from typing import Optional
 # slugs; escalation climbs cheap → standard → premium. The base_model argument
 # selects which tier the run starts on (Opus for real builds, glm-5.2 for smoke).
 MODEL_TIERS = {
-    "cheap":    "z-ai/glm-5.2",
+    "cheap":    "deepseek/deepseek-v4-pro",  # TEMP 2026-07-02: z-ai upstream outage; revert to z-ai/glm-5.2 when Z.AI recovers
     "standard": "anthropic/claude-sonnet-4.6",
     "premium":  "anthropic/claude-sonnet-5",
 }
