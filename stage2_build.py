@@ -158,6 +158,13 @@ def core_loop(build_prompt, manifest, model, preset, work_dir, art_dir, max_segm
         if not m:
             lb(f"seg {seg}: no sentinel; nudging")
             retries += 1  # repeated nudges = stuck -> escalate (REVIEW §3.1)
+            if retries > 6:
+                # Nudge cap (2026-07-02 postmortem: DeepSeek ignored the sentinel
+                # protocol for 36 paid segments and drained the OpenRouter credit).
+                # Six fruitless nudges across two escalation tiers = the model is
+                # not going to comply; fail loudly instead of burning budget.
+                lb(f"seg {seg}: NUDGE CAP (6) exceeded - aborting run as BUILD_BLOCKED:nudge-cap")
+                raise SystemExit(3)
             seg_model = hr.pick_segment_model(model, retries=retries, red_zone=red_zone, blast=blast, stuck=True)
             out, err, sid, rc = hermes_segment(
                 "Continue. If finished emit BUILD_COMPLETE. If at a decision checkpoint emit "
