@@ -18,7 +18,7 @@ PANEL_FULL   = ["deepseek/deepseek-v4-pro", "moonshotai/kimi-k2.6", "z-ai/glm-5.
 PANEL_BUDGET = ["openai/gpt-4o", "moonshotai/kimi-k2.6", "deepseek/deepseek-v4-pro"]
 JUDGE = "google/gemini-3.5-flash"
 SYNTH_FULL   = "anthropic/claude-sonnet-5"  # was opus-4.6 ($5in/$25out); sonnet-5 is $2in/$10out, newer gen
-SYNTH_BUDGET = "anthropic/claude-sonnet-4.6"
+SYNTH_BUDGET = "deepseek/deepseek-v4-pro"  # Morley 2026-07-02: Sonnet only when necessary
 
 # ── council-config override seam ──────────────────────────────────────────────
 # Reads ~/harness/council-config.json (env COUNCIL_CONFIG overrides for tests).

@@ -172,7 +172,7 @@ def core_loop(build_prompt, manifest, model, preset, work_dir, art_dir, max_segm
             red_zone = red_zone or hz.detect_red_zone(_changed_files(work_dir, base_ref))
             seg += 1; continue
         cid = m.group(1); cp = cp_by_id.get(cid)
-        pre = "budget" if (preset == "budget" or (cp or {}).get("panel_override") == "budget") else None
+        pre = None if ((cp or {}).get("panel_override") == "full" or preset == "full") else "budget"  # Morley 2026-07-02: budget synth (deepseek) is the DEFAULT; sonnet-5 full synth only on explicitly-marked checkpoints
         if cid in consulted:
             # DEDUPE (runbook §5 known gap): re-emitting an already-consulted checkpoint
             # used to re-run the council — duplicated spend and an opening for the council
