@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Archie Console</title>
+  <style>
+    :root {
+      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a;
+      --text: #e4e4e7; --muted: #71717a; --accent: #6366f1;
+      --green: #22c55e; --amber: #f59e0b; --red: #ef4444;
+      --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; line-height: 1.5; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+    h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 1.5rem; }
+    h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.75rem; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    td { font-family: var(--mono); }
+    .badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 0.25rem; font-size: 0.7rem; font-weight: 600; }
+    .badge-default { background: #2a2d3a; color: var(--muted); }
+    .badge-file { background: rgba(99,102,241,0.15); color: var(--accent); }
+    .badge-ok { background: rgba(34,197,94,0.15); color: var(--green); }
+    .badge-warn { background: rgba(245,158,11,0.15); color: var(--amber); }
+    .badge-blocked { background: rgba(239,68,68,0.15); color: var(--red); }
+    input[type="text"], input[type="password"] {
+      background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      padding: 0.4rem 0.6rem; border-radius: 0.3rem; font-size: 0.85rem; width: 100%;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    button {
+      background: var(--accent); color: white; border: none; padding: 0.4rem 0.8rem;
+      border-radius: 0.3rem; cursor: pointer; font-size: 0.85rem; font-weight: 500;
+    }
+    button:hover { opacity: 0.9; }
+    button.secondary { background: var(--surface); border: 1px solid var(--border); }
+    .row { display: flex; gap: 0.5rem; align-items: center; }
+    .warnings { background: rgba(245,158,11,0.1); border: 1px solid var(--amber); border-radius: 0.375rem; padding: 0.5rem 0.75rem; margin-top: 0.5rem; }
+    .warnings div { color: var(--amber); font-size: 0.8rem; }
+    .token-prompt { position: fixed; top: 1rem; right: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; z-index: 100; display: none; }
+    .token-prompt.show { display: block; }
+    .pending { background: rgba(99,102,241,0.05); border: 1px dashed var(--accent); }
+    .diff-old { color: var(--red); text-decoration: line-through; }
+    .diff-new { color: var(--green); }
+    .search-box { margin-bottom: 0.75rem; }
+    .model-actions button { font-size: 0.7rem; padding: 0.2rem 0.4rem; margin-right: 0.2rem; }
+    .catalog-table { max-height: 400px; overflow-y: auto; }
+    .status-msg { padding: 0.5rem; border-radius: 0.3rem; margin-top: 0.5rem; font-size: 0.8rem; }
+    .status-ok { background: rgba(34,197,94,0.1); color: var(--green); }
+    .status-err { background: rgba(239,68,68,0.1); color: var(--red); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Archie Console</h1>
+    <div id="status"></div>
+
+    <div class="token-prompt" id="tokenPrompt">
+      <h2>Enter Token</h2>
+      <p style="color:var(--muted);font-size:0.8rem;margin-bottom:0.5rem">Found in ~/harness/console-token</p>
+      <input type="password" id="tokenInput" placeholder="Bearer token" style="margin-bottom:0.5rem">
+      <button onclick="saveToken()">Save</button>
+    </div>
+
+    <div class="card">
+      <h2>Effective Config</h2>
+      <table id="configTable">
+        <thead><tr><th>Role</th><th>Value</th><th>Source</th></tr></thead>
+        <tbody id="configBody"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Model Browser</h2>
+      <div class="search-box row">
+        <input type="text" id="searchInput" placeholder="Search models..." oninput="searchModels()">
+        <button class="secondary" onclick="refreshCatalog()">Refresh</button>
+      </div>
+      <div class="catalog-table">
+        <table>
+          <thead><tr><th>ID</th><th>Price (in/out /1M)</th><th>Context</th><th>Ledger</th><th>Policy</th><th>Use as...</th></tr></thead>
+          <tbody id="modelsBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card pending">
+      <h2>Pending Changes</h2>
+      <div id="pendingDiff"></div>
+      <div style="margin-top:0.75rem">
+        <button onclick="deployConfig()">Deploy</button>
+        <button class="secondary" onclick="clearPending()">Clear</button>
+      </div>
+    </div>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

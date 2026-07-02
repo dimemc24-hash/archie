@@ -1,0 +1,12 @@
+[Unit]
+Description=Archie Console (model choice + fusion council deploy)
+After=network-online.target
+
+[Service]
+Environment=PATH=/home/hermes/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/hermes/.hermes/hermes-agent/venv/bin/python3 /home/hermes/harness/console/app.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

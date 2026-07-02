@@ -20,6 +20,87 @@ JUDGE = "google/gemini-3.5-flash"
 SYNTH_FULL   = "anthropic/claude-sonnet-5"  # was opus-4.6 ($5in/$25out); sonnet-5 is $2in/$10out, newer gen
 SYNTH_BUDGET = "anthropic/claude-sonnet-4.6"
 
+# ── council-config override seam ──────────────────────────────────────────────
+# Reads ~/harness/council-config.json (env COUNCIL_CONFIG overrides for tests).
+# Missing file → exactly today's behavior (constants). Corrupt JSON or wrong
+# types → fall back to ALL constants + one stderr warning (never crash, never
+# partially apply a corrupt file). Read fresh on every fusion() call (tiny file).
+_CONFIG_PATH = os.environ.get(
+    "COUNCIL_CONFIG",
+    os.path.join(os.path.expanduser("~/harness"), "council-config.json"),
+)
+
+
+def _load_council_config():
+    """Return (overrides_dict, source) where source is "file" or "default".
+
+    On any error (missing file, bad JSON, wrong types) returns ({}, "default")
+    and prints one stderr line for the bad-JSON case only (missing file is the
+    normal no-config state, not worth a warning).
+    """
+    path = os.environ.get("COUNCIL_CONFIG", _CONFIG_PATH)
+    try:
+        with open(path) as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
+        return {}, "default"
+    except (json.JSONDecodeError, OSError) as exc:
+        sys.stderr.write(f"[fusion] council-config invalid ({path}): {exc}\n")
+        return {}, "default"
+    # type-check: must be a dict; panel_* must be lists of str; judge/synth_* str.
+    if not isinstance(raw, dict):
+        sys.stderr.write(f"[fusion] council-config invalid ({path}): root is not a dict\n")
+        return {}, "default"
+    overrides = {}
+    for key in ("panel_full", "panel_budget"):
+        val = raw.get(key)
+        if val is None:
+            continue
+        if not isinstance(val, list) or not all(isinstance(s, str) for s in val):
+            sys.stderr.write(f"[fusion] council-config invalid ({path}): {key} must be a list of strings\n")
+            return {}, "default"
+        overrides[key] = val
+    for key in ("judge", "synth_full", "synth_budget"):
+        val = raw.get(key)
+        if val is None:
+            continue
+        if not isinstance(val, str):
+            sys.stderr.write(f"[fusion] council-config invalid ({path}): {key} must be a string\n")
+            return {}, "default"
+        overrides[key] = val
+    return overrides, "file"
+
+
+def resolve_council_models(preset=None):
+    """Return effective models for the five roles + a source label.
+
+    Returns: {"panel": [...], "judge": str, "synth": str,
+              "sources": {"panel_full": "file"|"default", ...}}
+    Missing keys fall back to the module constants.
+    """
+    overrides, src = _load_council_config()
+    panel_full = overrides.get("panel_full", PANEL_FULL)
+    panel_budget = overrides.get("panel_budget", PANEL_BUDGET)
+    judge = overrides.get("judge", JUDGE)
+    synth_full = overrides.get("synth_full", SYNTH_FULL)
+    synth_budget = overrides.get("synth_budget", SYNTH_BUDGET)
+    sources = {
+        "panel_full":   src if "panel_full" in overrides else "default",
+        "panel_budget": src if "panel_budget" in overrides else "default",
+        "judge":        src if "judge" in overrides else "default",
+        "synth_full":   src if "synth_full" in overrides else "default",
+        "synth_budget": src if "synth_budget" in overrides else "default",
+    }
+    panel = panel_budget if preset == "budget" else panel_full
+    synth = synth_budget if preset == "budget" else synth_full
+    return {
+        "panel": panel, "judge": judge, "synth": synth,
+        "sources": sources,
+        "panel_full": panel_full, "panel_budget": panel_budget,
+        "synth_full": synth_full, "synth_budget": synth_budget,
+    }
+
+
 def _key():
     k = os.environ.get("OPENROUTER_API_KEY")
     if k:
@@ -74,7 +155,8 @@ def _panelist(model, question, context):
     return {"model": model, "opinion": out}
 
 def fusion(question, context, preset=None):
-    panel = PANEL_BUDGET if preset == "budget" else PANEL_FULL
+    resolved = resolve_council_models(preset=preset)
+    panel = resolved["panel"]
     with cf.ThreadPoolExecutor(max_workers=len(panel)) as ex:
         opinions = list(ex.map(lambda m: _panelist(m, question, context), panel))
 
@@ -82,7 +164,7 @@ def fusion(question, context, preset=None):
     judge_sys = ("You are the council judge. You are given a QUESTION and several advisor opinions. Produce a "
                  "neutral analysis: where they AGREE, where they CONTRADICT each other, and what BLIND SPOTS "
                  "they collectively miss. Do not pick a winner; surface the decision-relevant tensions. 250 words max.")
-    judge = call_model(JUDGE, judge_sys, f"QUESTION:\n{question}\n\nOPINIONS:\n{panel_block}", role="judge")
+    judge = call_model(resolved["judge"], judge_sys, f"QUESTION:\n{question}\n\nOPINIONS:\n{panel_block}", role="judge")
 
     synth_sys = ("You are the council synthesizer. Given the QUESTION, the advisor opinions, and the judge's "
                  "analysis, produce the FINAL recommendation. Output EXACTLY one fenced json object with keys: "
@@ -91,8 +173,7 @@ def fusion(question, context, preset=None):
                  "The synthesis must answer ONLY the question asked and propose nothing beyond the spec (no new features, files, migrations, or scope). Output ONLY the fenced json block.")
     synth_user = f"QUESTION:\n{question}\n\nOPINIONS:\n{panel_block}\n\nJUDGE ANALYSIS:\n{judge}"
     try:
-        synth_model = SYNTH_BUDGET if preset == "budget" else SYNTH_FULL
-        synth_raw = call_model(synth_model, synth_sys, synth_user, role="synth")
+        synth_raw = call_model(resolved["synth"], synth_sys, synth_user, role="synth")
     except hl.CircuitOpen:
         synth_raw = "[CIRCUIT OPEN] proceed with best judgment from the judge analysis"
     parsed = _extract_json(synth_raw) or {"synthesis": synth_raw, "contradictions": [], "blindspots": []}
