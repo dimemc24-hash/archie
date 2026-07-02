@@ -16,4 +16,9 @@ jobs:
         run: python -m py_compile $(git ls-files '*.py')
       - name: harness-control + plugin tests
         run: python -m pytest skills/harness-control/test_wrappers.py dashboard-plugins/test_plugin_apis.py -q
-      # port/test_port.py joins once the pre-existing spendToday failure is fixed
+      - name: port suite (TZ-deterministic since run 2026-07-01-utc-day-ledger)
+        run: |
+          python port/test_port.py
+          TZ=America/New_York python port/test_port.py
+      # test_stage2_dedupe.py stays on-box only: importing stage2_build pulls in
+      # fusion, which expects the droplet's ~/.hermes credentials.
