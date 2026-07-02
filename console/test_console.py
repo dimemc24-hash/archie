@@ -340,3 +340,19 @@ def test_deploy_partial_update_merges(client):
     # judge updated
     assert cfg["judge"] == "moonshotai/kimi-k2.6"
 
+
+
+def test_normalize_catalog_entry_converts_per_token_to_per_1m():
+    """OpenRouter prices are per-token strings; our fields are per-1M. A stubbed
+    catalog hid this once — pin the conversion against a RAW entry."""
+    import app as appmod
+    raw = {
+        "id": "z-ai/glm-5.2",
+        "name": "GLM 5.2",
+        "pricing": {"prompt": "0.00000093", "completion": "0.000003"},
+        "context_length": 128000,
+    }
+    e = appmod._normalize_catalog_entry(raw)
+    assert e["prompt_per_1m"] == 0.93
+    assert e["completion_per_1m"] == 3.0
+    assert appmod._normalize_catalog_entry({"id": "x/y", "pricing": {}})["prompt_per_1m"] is None

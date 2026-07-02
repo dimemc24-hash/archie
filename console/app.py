@@ -112,12 +112,18 @@ def _normalize_catalog_entry(raw: dict) -> dict:
     return {
         "id": slug,
         "name": raw.get("name", ""),
-        "prompt_per_1m": _safe_float(pricing.get("prompt")),
-        "completion_per_1m": _safe_float(pricing.get("completion")),
+        "prompt_per_1m": _to_per_1m(pricing.get("prompt")),
+        "completion_per_1m": _to_per_1m(pricing.get("completion")),
         "context_length": raw.get("context_length", 0),
         "priced_in_ledger": slug in hl.PRICE_TABLE,
         "policy": _annotate_policy(slug),
     }
+
+
+def _to_per_1m(per_token) -> Optional[float]:
+    """OpenRouter pricing is USD per TOKEN; the UI speaks USD per 1M tokens."""
+    f = _safe_float(per_token)
+    return round(f * 1_000_000, 6) if f is not None else None
 
 
 def _safe_float(v) -> Optional[float]:
