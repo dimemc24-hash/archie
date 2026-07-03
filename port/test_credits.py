@@ -30,6 +30,15 @@ def _suppress_warning():
     oc._warned = True  # leave it suppressed for subsequent tests
 
 
+@pytest.fixture(autouse=True)
+def _pin_api_key(monkeypatch):
+    """Key resolution runs BEFORE the stubbed transport; without a key
+    get_credits returns None and every parsing test silently degrades.
+    These passed on the droplet only because ~/.hermes/auth.json exists
+    there — pin a dummy env key so they mean the same thing in CI."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "TEST_DUMMY_KEY")
+
+
 # ── parsing + remaining math ────────────────────────────────────────────────
 
 def test_parsing_and_remaining():
