@@ -66,15 +66,9 @@ insert into storage.buckets (id, name, public)
 values ('listing-photos', 'listing-photos', false)
 on conflict (id) do nothing;
 
--- Grant the service role full access to the bucket (it bypasses RLS anyway,
--- but being explicit doesn't hurt). Anon gets nothing.
--- These policies are on storage.objects, not public.listings.
+-- NO storage policies are created for this bucket, deliberately. The service
+-- role BYPASSES RLS, so it needs no policy — and a policy without a TO clause
+-- applies to ALL roles (anon included), which would GRANT the very access we
+-- are denying. Deny-by-default is the correct end state: anon key queries
+-- against storage.objects for this bucket match no policy and return nothing.
 drop policy if exists "service_all_listing_photos" on storage.objects;
-create policy "service_all_listing_photos" on storage.objects
-    for all
-    using (bucket_id = 'listing-photos')
-    with check (bucket_id = 'listing-photos');
-
--- The service role bypasses RLS, so the policy above is belt-and-suspenders.
--- Anon key queries against storage.objects for this bucket will be denied
--- because there is no anon-friendly policy.
