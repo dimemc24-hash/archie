@@ -1,0 +1,11 @@
+{
+  "checkpoints": [
+    {
+      "id": "category-strategy",
+      "trigger": "before implementing the leaf-category fix in publish.py",
+      "question": "eBay publishOffer rejects non-leaf category IDs (errorId 25005), and the current fallback '1' is a top-level node. Where should leaf-category resolution live? Options: (a) at PUBLISH time \u2014 EbayProvider calls Taxonomy get_category_suggestions (user-token auth, injectable transport, verified working: 'candlestick' -> 4062) and takes the top suggestion, caching per category_guess; simple call path but the category choice never passes a human eye; (b) at PRICING time \u2014 pricing.py resolves and stores the suggested categoryId in the row's pricing jsonb, so Morley SEES it at the approve gate and publish stays deterministic/no-network-surprise; costs a schema-shape addition to pricing jsonb and a re-price if the guess is wrong; (c) env override EBAY_DEFAULT_CATEGORY_ID plus a small hardcoded leaf map, taxonomy deferred \u2014 cheapest, but wrong categories hurt fees/discoverability and the map rots. In every option the no-resolution failure mode must be an actionable error naming exactly what to set. Which fits a one-seller pipeline whose ONLY quality gate is the human approve step?",
+      "on_synthesis": "implement exactly the chosen resolution point with an injectable transport and tests using the real suggestion-response shape from kb/ebay-integration-notes.md, including the actionable-error path when nothing resolves",
+      "panel_override": "budget"
+    }
+  ]
+}
