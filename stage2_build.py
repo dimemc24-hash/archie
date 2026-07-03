@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(HARNESS, "port"))
 import harness_routing as hr  # noqa: E402
 import harness_ledger as hl   # noqa: E402
 import harness_redzone as hz  # noqa: E402
+import openrouter_credits as orc  # noqa: E402 — credits meter (speedometer)
 
 REPO      = os.path.join(HARNESS, "repo")  # default (legacy/no --profile): the NewChapter checkout
 PROFILES_DIR = os.path.join(HARNESS, "profiles")
@@ -38,6 +39,17 @@ PROFILE   = None  # set per-run: "hivemind" (Opus@xhigh) for real builds; None f
 SENT_CP   = re.compile(r"CHECKPOINT_REACHED:\s*([A-Za-z0-9_.-]+)")
 SENT_DONE = re.compile(r"BUILD_COMPLETE")
 REQ_CP_KEYS = {"id", "trigger", "question", "on_synthesis"}
+
+# ── credits speedometer (build-spec.md §2) ──────────────────────────────────
+# Floor: abort before launching a segment if account remaining is below this.
+# Env-overridable for testing. A None reading (meter unreachable) NEVER blocks.
+OPENROUTER_MIN_CREDITS = float(os.environ.get("OPENROUTER_MIN_CREDITS", "10.0"))
+# Per-segment estimate fallback (hermes -z emits no usage line; REVIEW §3.2).
+# Kept as the exact pre-meter constants so the estimate path is unchanged.
+_EST_PROMPT_TOKENS = 2000
+_EST_COMPLETION_TOKENS = 1500
+# alert.sh path for the credits-floor abort signal.
+ALERT_SH = os.path.join(HARNESS, "alert.sh")
 
 def run(cmd, cwd, timeout=5400):
     try:
@@ -56,13 +68,66 @@ def newest_sid(cwd):
     lines = [l for l in out.splitlines() if l.strip()]
     return lines[-1].split()[-1] if lines else None
 
+def _alert(msg):
+    """Fire ~/harness/alert.sh with msg if it exists; never raise on failure."""
+    try:
+        if os.path.isfile(ALERT_SH):
+            run(["bash", ALERT_SH, msg], cwd=HARNESS, timeout=30)
+    except Exception:
+        pass  # alert failure must never block the build path
+
+
+def _credits_floor_check():
+    """Credits floor gate (build-spec.md §2). Before launching a segment, if a
+    fresh credits sample shows remaining < OPENROUTER_MIN_CREDITS, log the
+    BUILD_BLOCKED sentinel, alert, and abort with SystemExit(4).
+
+    A None sample (meter unreachable) NEVER blocks — one logged warning, skip.
+    """
+    sample = orc.get_credits()
+    if sample is None:
+        # unreachable meter: must not block work (build-spec.md §2)
+        return
+    remaining = sample["remaining"]
+    if remaining < OPENROUTER_MIN_CREDITS:
+        msg = (f"BUILD_BLOCKED:credits-floor remaining=${remaining:.2f} "
+               f"< ${OPENROUTER_MIN_CREDITS:.2f} min — aborting before segment launch")
+        print(f"[stage2] {msg}", flush=True)
+        _alert(msg)
+        raise SystemExit(4)
+
+
 def hermes_segment(prompt, model, cwd, resume_sid=None, timeout=5400, ledger=None, role="codex"):
+    # ── credits floor (build-spec.md §2): abort before launch if remaining < min ──
+    _credits_floor_check()
+
     cmd = _hbase() + (["--resume", resume_sid] if resume_sid else [])
     cmd += ["-z", prompt, *HEADLESS, "-m", model, *PROV]
+
+    # ── speedometer: sample account credits before the subprocess (build-spec.md §2) ──
+    before = orc.get_credits()
+
     rc, out, err = run(cmd, cwd, timeout=timeout)
+
+    # ── charge the ledger: metered delta if both samples, else estimate fallback ──
+    # Council decision (delta-attribution, Option a): charge the FULL account-level
+    # delta to this running segment. Under concurrency (Archie's chat, a parallel
+    # run, the Fusion council itself) the delta overcounts — the breaker trips
+    # EARLY, which is the safe conservative direction for runaway prevention.
+    # The account-level total is always honest. The trigger field distinguishes
+    # metered rows ("credits-delta") from estimated rows ("estimate").
     if ledger:
-        # hermes -z emits no usage line; charge a conservative per-segment estimate (REVIEW §3.2 fallback)
-        ledger.charge(model, {"prompt_tokens": 2000, "completion_tokens": 1500}, role=role)
+        after = orc.get_credits()
+        if before is not None and after is not None:
+            real_cost = max(0.0, after["total_usage"] - before["total_usage"])
+            ledger.charge(model, {"prompt_tokens": 0, "completion_tokens": 0},
+                          role=role, cost_usd=real_cost, trigger="credits-delta")
+        else:
+            # meter unreachable on one or both sides: keep the exact estimate (REVIEW §3.2)
+            ledger.charge(model,
+                          {"prompt_tokens": _EST_PROMPT_TOKENS,
+                           "completion_tokens": _EST_COMPLETION_TOKENS},
+                          role=role, trigger="estimate")
     return out, err, newest_sid(cwd), rc
 
 def validate_manifest(m):
