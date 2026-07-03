@@ -1,0 +1,17 @@
+[
+  {
+    "checkpoint": "category-strategy",
+    "question": "eBay publishOffer rejects non-leaf category IDs (errorId 25005), and the current fallback '1' is a top-level node. Where should leaf-category resolution live? Options: (a) at PUBLISH time \u2014 EbayProvider calls Taxonomy get_category_suggestions (user-token auth, injectable transport, verified working: 'candlestick' -> 4062) and takes the top suggestion, caching per category_guess; simple call path but the category choice never passes a human eye; (b) at PRICING time \u2014 pricing.py resolves and stores the suggested categoryId in the row's pricing jsonb, so Morley SEES it at the approve gate and publish stays deterministic/no-network-surprise; costs a schema-shape addition to pricing jsonb and a re-price if the guess is wrong; (c) env override EBAY_DEFAULT_CATEGORY_ID plus a small hardcoded leaf map, taxonomy deferred \u2014 cheapest, but wrong categories hurt fees/discoverability and the map rots. In every option the no-resolution failure mode must be an actionable error naming exactly what to set. Which fits a one-seller pipeline whose ONLY quality gate is the human approve step?",
+    "synthesis": "Implement option (b) at PRICING time: resolve the leaf category via Taxonomy get_category_suggestions and store the suggested categoryId in the pricing jsonb. This surfaces the exact category at the human approve gate\u2014the pipeline's only quality check\u2014so Morley can verify or correct it, keeping publish deterministic and free of network surprises. The fallback must be an actionable error (e.g., 'category not resolved; set category_guess or override'), not a silent default.",
+    "contradictions": [
+      "Advisor 3 warns of a re-price loop if the automatic guess changes repeatedly, while Advisor 1 treats the re-price as an acceptable overhead."
+    ],
+    "blindspots": [
+      "Taxonomy drift: if significant time passes between pricing/approval and publish, eBay may reorganize categories, causing the stored leaf ID to become invalid and re-introducing the publishOffer error.",
+      "UI/UX overhead: the approval interface must be modified to display and allow editing of the new category field, and the cost of that work is not considered."
+    ],
+    "fallback": false,
+    "manifest_gap": false,
+    "resumed_sid": "20260703_193351_7e7416"
+  }
+]

@@ -247,7 +247,13 @@ class SupabaseClient:
     # -- Storage ------------------------------------------------------------
 
     def ensure_bucket(self, bucket: str = STORAGE_BUCKET) -> None:
-        """Create the Storage bucket if it doesn't exist (idempotent)."""
+        """Create the Storage bucket if it doesn't exist (idempotent).
+
+        Supabase wraps a duplicate-bucket conflict as HTTP 400 with body
+        ``{"statusCode":"409","error":"Duplicate",...}`` — not a real 409.
+        We detect it via the body's statusCode/error so it's treated as
+        success (verified live 2026-07-03).
+        """
         body = json.dumps({"id": bucket, "name": bucket, "public": False}).encode()
         try:
             self._request(
@@ -256,9 +262,9 @@ class SupabaseClient:
                 headers=self._headers(json_body=True),
             )
         except _HttpError as e:
-            # 409 = bucket already exists — not an error.
-            if e.code != 409:
-                raise
+            if e.code == 409 or _is_duplicate_bucket_error(e):
+                return  # bucket already exists — not an error.
+            raise
 
     def upload_photo(
         self,
@@ -324,9 +330,15 @@ class SupabaseClient:
         data = self._read(resp)
         if isinstance(data, dict) and "signedURL" in data:
             signed = data["signedURL"]
+            if signed.startswith("http://") or signed.startswith("https://"):
+                return signed  # already absolute
+            # Supabase returns a path relative to /storage/v1, e.g.
+            # "/object/sign/listing-photos/<id>/0.jpg?token=...".  Joining
+            # project_url + signedURL → 404; project_url + "/storage/v1" +
+            # signedURL → 200 (verified live 2026-07-03).
             if signed.startswith("/"):
-                signed = self.url + signed
-            return signed
+                return self.url + "/storage/v1" + signed
+            return self.url + "/storage/v1/" + signed
         raise RuntimeError(f"signed_url: unexpected response: {data}")
 
 
@@ -423,6 +435,27 @@ def _parse_notes(notes: Any) -> Any:
         except (json.JSONDecodeError, ValueError):
             return notes
     return notes
+
+
+def _is_duplicate_bucket_error(e: _HttpError) -> bool:
+    """Detect a Supabase duplicate-bucket conflict wrapped as HTTP 400.
+
+    Live observed body: ``{"statusCode":"409","error":"Duplicate",...}`` —
+    Supabase returns 400 (not 409) for this case.  We parse the body to
+    distinguish it from a genuine 400 error.
+    """
+    if not e.body:
+        return False
+    try:
+        data = json.loads(e.body)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    return (
+        str(data.get("statusCode", "")) == "409"
+        or str(data.get("error", "")).lower() == "duplicate"
+    )
 
 
 __all__ = [
