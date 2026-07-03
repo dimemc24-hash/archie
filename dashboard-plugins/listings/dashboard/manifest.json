@@ -1,0 +1,13 @@
+{
+  "name": "listings",
+  "label": "Listings",
+  "description": "Antiques listing pipeline: queue view grouped by status with counts, listing detail with fields and signed photo URLs. Read-only.",
+  "icon": "Package",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/listings",
+    "position": "after:harness-run"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
