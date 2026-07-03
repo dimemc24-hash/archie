@@ -47,8 +47,23 @@ git fetch origin -q || abort "git fetch origin failed" 11
 git push -f hetzner "$BASELINE:refs/heads/gh-main" 2>&1 | tail -1 || abort "push gh-main failed" 11
 
 echo "[transport] push $BUILD -> hetzner"
-git rev-parse --verify "$BUILD" >/dev/null 2>&1 || abort "local $BUILD missing" 3
-git push -f hetzner "$BUILD:refs/heads/$BUILD" 2>&1 | tail -1 || abort "push $BUILD failed" 11
+# Ship the freshest $BUILD: a fixpass pushed from another machine lands on
+# origin/$BUILD (fetched above) while the local ref goes stale (bit us
+# 2026-07-03: stale local build/ shipped a pre-fixpass tree to the swarm).
+SRC="$BUILD"
+if git rev-parse --verify "refs/remotes/origin/$BUILD" >/dev/null 2>&1; then
+  if ! git rev-parse --verify "$BUILD" >/dev/null 2>&1; then
+    SRC="refs/remotes/origin/$BUILD"
+  elif git merge-base --is-ancestor "$BUILD" "refs/remotes/origin/$BUILD"; then
+    SRC="refs/remotes/origin/$BUILD"
+  elif git merge-base --is-ancestor "refs/remotes/origin/$BUILD" "$BUILD"; then
+    SRC="$BUILD"
+  else
+    abort "local $BUILD and origin/$BUILD have diverged — reconcile before transport" 3
+  fi
+fi
+git rev-parse --verify "$SRC" >/dev/null 2>&1 || abort "no $BUILD ref (local or origin)" 3
+git push -f hetzner "$SRC:refs/heads/$BUILD" 2>&1 | tail -1 || abort "push $BUILD failed" 11
 
 echo "[transport] run_swarm.sh on hetzner (routes='$ROUTES' waves=$WAVES)..."
 ssh hetzner-swarm "bash \$HOME/swarm/run_swarm.sh '$BUILD' '$ROUTES' '$WAVES'"; SWARM_RC=$?
