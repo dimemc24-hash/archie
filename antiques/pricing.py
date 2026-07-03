@@ -158,6 +158,102 @@ class SoldComps:
 
 
 # --------------------------------------------------------------------------- #
+# TaxonomyResolver — leaf-category resolution at pricing time (council option b)
+# --------------------------------------------------------------------------- #
+
+class TaxonomyResolver(Protocol):
+    """Protocol for eBay Taxonomy leaf-category resolution."""
+
+    def resolve_category(self, query: str) -> dict[str, Any] | None:
+        """Resolve a search term to a leaf category.
+
+        Returns ``{"category_id": str, "category_name": str}`` or ``None``
+        if no suggestion is returned.
+        """
+        ...
+
+
+class EbayTaxonomyResolver:
+    """eBay Taxonomy API leaf-category resolver (real request shape).
+
+    Calls ``GET /commerce/taxonomy/v1/category_tree/0/get_category_suggestions
+    ?q=<query>`` with user-token Bearer auth.  Takes the top suggestion's
+    ``categoryId`` (verified working: 'candlestick' → 4062, publish-verified).
+
+    Requires ``EBAY_OAUTH_TOKEN``. Without it → ``NotConnected`` at
+    construction.  The ``transport`` is injectable for tests.
+    """
+
+    def __init__(
+        self,
+        *,
+        token: str | None = None,
+        api_base: str | None = None,
+        transport=default_transport,
+    ):
+        self.token = token or os.environ.get("EBAY_OAUTH_TOKEN", "")
+        self.api_base = (api_base or os.environ.get("EBAY_API_BASE", EBAY_API_BASE_DEFAULT)).rstrip("/")
+        self.transport = transport
+        if not self.token:
+            raise NotConnected(
+                ["EBAY_OAUTH_TOKEN"],
+                "eBay Taxonomy API needs a user access token",
+            )
+
+    def resolve_category(self, query: str) -> dict[str, Any] | None:
+        if not query:
+            return None
+        path = (
+            "/commerce/taxonomy/v1/category_tree/0/get_category_suggestions"
+            f"?q={urllib.parse.quote(query)}"
+        )
+        req = urllib.request.Request(self.api_base + path, method="GET")
+        req.add_header("Authorization", "Bearer " + self.token)
+        req.add_header("Accept", "application/json")
+
+        resp = self.transport(req)
+        raw = resp.read() if not isinstance(resp, (dict, list)) else None
+        data = json.loads(raw) if raw else resp
+
+        suggestions = data.get("categorySuggestions", []) if isinstance(data, dict) else []
+        if not suggestions or not isinstance(suggestions, list):
+            return None
+        first = suggestions[0]
+        if not isinstance(first, dict):
+            return None
+        cat = first.get("category", {})
+        if not isinstance(cat, dict):
+            return None
+        cat_id = cat.get("categoryId", "")
+        if not cat_id:
+            return None
+        return {
+            "category_id": str(cat_id),
+            "category_name": cat.get("categoryName", ""),
+        }
+
+
+class CategoryNotResolvedError(RuntimeError):
+    """Raised when Taxonomy resolution returns no leaf category.
+
+    Actionable: tells the operator to set ``category_guess`` or manually
+    set ``pricing.category_id`` — never a silent default to ``"1"``.
+    """
+
+    def __init__(self, query: str, listing_id: str = ""):
+        self.query = query
+        self.listing_id = listing_id
+        loc = f" listing {listing_id}" if listing_id else ""
+        super().__init__(
+            f"category not resolved for query '{query}'{loc} — "
+            f"eBay Taxonomy get_category_suggestions returned no suggestions. "
+            f"Set category_guess on the listing to a more specific term, "
+            f"or manually set pricing.category_id to a known leaf category ID. "
+            f"Do NOT use '1' — it is a non-leaf node (errorId 25005)."
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Price recommendation
 # --------------------------------------------------------------------------- #
 
@@ -196,11 +292,18 @@ def price_listing(
     client: SupabaseClient | None = None,
     *,
     query: str | None = None,
+    taxonomy_resolver: TaxonomyResolver | None = None,
 ) -> dict[str, Any]:
     """Price a listing: fetch comps, compute recommendation, write pricing jsonb,
     advance ``draft → priced``.
 
     ``query`` defaults to the listing title.
+    ``taxonomy_resolver``: when provided, resolves the eBay leaf category via
+    Taxonomy ``get_category_suggestions`` and stores ``category_id`` +
+    ``category_name`` in the pricing jsonb so Morley can verify/correct it at
+    the approve gate.  When resolution returns nothing, raises
+    ``CategoryNotResolvedError`` (actionable — never a silent default).
+
     Returns the updated row.
     """
     client = client or SupabaseClient()
@@ -215,7 +318,7 @@ def price_listing(
     comps = provider.search_comps(q)
     rec = recommend_price(comps)
 
-    pricing = {
+    pricing: dict[str, Any] = {
         "comps": comps,
         "recommended": rec["recommended"],
         "range": {"low": rec["low"], "high": rec["high"]},
@@ -223,6 +326,18 @@ def price_listing(
         "n_comps": rec["n_comps"],
         "priced_at": _now_iso(),
     }
+
+    # Leaf-category resolution at pricing time (council option b).  The
+    # resolved category_id is stored in pricing jsonb so it surfaces at the
+    # approve gate.  No resolution → actionable error, never a silent default.
+    if taxonomy_resolver is not None:
+        # Use category_guess if present (more specific than title), else title.
+        cat_query = row.get("category_guess") or q
+        resolved = taxonomy_resolver.resolve_category(cat_query)
+        if resolved is None:
+            raise CategoryNotResolvedError(cat_query, row_id)
+        pricing["category_id"] = resolved["category_id"]
+        pricing["category_name"] = resolved["category_name"]
 
     return client.advance(row_id, "draft", "priced", {"pricing": pricing})
 
@@ -233,6 +348,9 @@ __all__ = [
     "ManualComps",
     "EbayBrowseComps",
     "SoldComps",
+    "TaxonomyResolver",
+    "EbayTaxonomyResolver",
+    "CategoryNotResolvedError",
     "recommend_price",
     "price_listing",
 ]

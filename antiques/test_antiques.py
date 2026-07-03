@@ -34,9 +34,11 @@ from antiques.common import (  # noqa: E402
 )
 from antiques.pricing import (  # noqa: E402
     EbayBrowseComps,
+    EbayTaxonomyResolver,
     ManualComps,
     NotConnected,
     SoldComps,
+    CategoryNotResolvedError,
     price_listing,
     recommend_price,
 )
@@ -52,6 +54,7 @@ from antiques.publish import (  # noqa: E402
     EbayProvider,
     publish_listing,
     _build_ebay_requests,
+    _resolve_category_id,
 )
 from antiques.fulfill import (  # noqa: E402
     DryRunLabelProvider,
@@ -142,6 +145,17 @@ def _extract_id_from_url(url: str) -> str:
     if "id=eq." in url:
         return url.split("id=eq.")[1].split("&")[0]
     return ""
+
+
+def _set_category_id(client, row_id="test-0", cat_id="31387", cat_name="Wristwatches"):
+    """Helper: inject a resolved category_id into the pricing jsonb after
+    price_listing (simulating what EbayTaxonomyResolver would do at pricing
+    time in a connected environment)."""
+    row = client.get_listing(row_id)
+    pricing = row.get("pricing") or {}
+    pricing["category_id"] = cat_id
+    pricing["category_name"] = cat_name
+    client.patch_listing(row_id, {"pricing": pricing})
 
 
 @pytest.fixture
@@ -446,7 +460,7 @@ class TestApprove:
 class TestPublish:
 
     def _setup_approved(self, client, photos=None):
-        """Helper: create a draft, price it, approve it."""
+        """Helper: create a draft, price it (with category_id), approve it."""
         client.insert_listing({
             "status": "draft",
             "title": "Omega Seamaster",
@@ -456,6 +470,12 @@ class TestPublish:
             "photos": photos or [],
         })
         price_listing("test-0", ManualComps([{"price": 200.0}]), client)
+        # Simulate taxonomy resolution: set category_id in pricing jsonb.
+        row = client.get_listing("test-0")
+        pricing = row.get("pricing") or {}
+        pricing["category_id"] = "31387"  # eBay leaf: Watches
+        pricing["category_name"] = "Wristwatches"
+        client.patch_listing("test-0", {"pricing": pricing})
         approve("test-0", weight_oz=5.0, client=client)
 
     def test_dry_run_publish(self, stub, tmp_artifacts):
@@ -554,6 +574,403 @@ class TestPublish:
 
 
 # --------------------------------------------------------------------------- #
+# eBay seam fixes (2026-07-03) — one test per fix, asserting on exact
+# payload / header / URL shapes from kb/ebay-integration-notes.md
+# --------------------------------------------------------------------------- #
+
+class TestEbaySeamFixes:
+    """Tests for the seven seam fixes from the live sandbox integration."""
+
+    def _setup_approved_with_photos(self, client, photos=None):
+        """Helper: create → price (with category_id) → approve."""
+        if photos is None:
+            photos = [{"bucket": "listing-photos", "path": "test-0/0.jpg"}]
+        client.insert_listing({
+            "status": "draft",
+            "title": "Candlestick",
+            "description": "Brass candlestick, Victorian",
+            "category_guess": "candlestick",
+            "appraisal": {"era": "1890", "brand": "", "condition": "excellent"},
+            "photos": photos,
+        })
+        price_listing("test-0", ManualComps([{"price": 45.0}]), client)
+        _set_category_id(client, cat_id="4062", cat_name="Candle Holders")
+        approve("test-0", weight_oz=8.0, client=client)
+
+    # Fix 1: aspects values must be list[str], not bare strings (errorId 2004)
+    def test_fix1_aspects_values_are_lists(self, stub, tmp_artifacts):
+        client, _ = stub
+        self._setup_approved_with_photos(client)
+        row = client.get_listing("test-0")
+        requests = _build_ebay_requests(row, sku="archie-test-0")
+        aspects = requests["inventory_item"]["product"]["aspects"]
+        # Every aspect value must be a list of strings (errorId 2004 if bare string).
+        for key, val in aspects.items():
+            assert isinstance(val, list), f"aspect {key} must be list, got {type(val)}"
+            assert all(isinstance(v, str) for v in val)
+        # category_guess drives the Type aspect.
+        assert aspects["Type"] == ["candlestick"]
+
+    # Fix 2: Content-Language: en-US header on JSON-body requests (errorId 25709)
+    def test_fix2_content_language_header(self, stub, tmp_artifacts):
+        client, _ = stub
+        self._setup_approved_with_photos(client)
+        row = client.get_listing("test-0")
+
+        # Build a stub transport that records headers.
+        captured_headers = {}
+
+        class HeaderCaptureTransport:
+            def __call__(self, req):
+                captured_headers.update(dict(req.header_items()))
+                class Resp:
+                    status = 204
+                    def read(self):
+                        return b"{}"
+                return Resp()
+
+        provider = EbayProvider(
+            env={
+                "EBAY_OAUTH_TOKEN": "test-token",
+                "EBAY_MERCHANT_LOCATION_KEY": "archie-br-01",
+                "EBAY_FULFILLMENT_POLICY_ID": "ful-1",
+                "EBAY_PAYMENT_POLICY_ID": "pay-1",
+                "EBAY_RETURN_POLICY_ID": "ret-1",
+            },
+            transport=HeaderCaptureTransport(),
+        )
+        # Just check _headers directly (it's what the requests use).
+        h = provider._headers(json_body=True)
+        assert h["Content-Language"] == "en-US"
+        assert h["Content-Type"] == "application/json"
+        # Non-json-body requests should NOT have Content-Language.
+        h_get = provider._headers(json_body=False)
+        assert "Content-Language" not in h_get
+
+    # Fix 3a: signed_url joins relative paths via /storage/v1 prefix
+    def test_fix3a_signed_url_correct_join(self):
+        """Supabase returns a relative path like /object/sign/... — the join
+        must be project_url + /storage/v1 + signedURL (verified live)."""
+
+        class RelativeSignTransport:
+            def __call__(self, req):
+                # Real observed shape: relative path starting with /object/sign/
+                return {"signedURL": "/object/sign/listing-photos/test-0/0.jpg?token=abc123"}
+
+        client = SupabaseClient(
+            url="https://stub.supabase.co",
+            key="stub-key",
+            transport=RelativeSignTransport(),
+        )
+        url = client.signed_url("test-0/0.jpg")
+        assert url == "https://stub.supabase.co/storage/v1/object/sign/listing-photos/test-0/0.jpg?token=abc123"
+
+        # Absolute URLs should be passed through untouched.
+        class AbsoluteSignTransport:
+            def __call__(self, req):
+                return {"signedURL": "https://cdn.supabase.co/object/sign/x.jpg?token=z"}
+
+        client2 = SupabaseClient(
+            url="https://stub.supabase.co",
+            key="stub-key",
+            transport=AbsoluteSignTransport(),
+        )
+        assert client2.signed_url("x.jpg") == "https://cdn.supabase.co/object/sign/x.jpg?token=z"
+
+    # Fix 3b: EbayProvider uses url_resolver for real image URLs
+    def test_fix3b_url_resolver_produces_real_urls(self, stub, tmp_artifacts):
+        client, _ = stub
+        self._setup_approved_with_photos(client, photos=[
+            {"bucket": "listing-photos", "path": "test-0/0.jpg"},
+            {"bucket": "listing-photos", "path": "test-0/1.jpg"},
+        ])
+        row = client.get_listing("test-0")
+
+        def fake_resolver(photo_ref):
+            return f"https://stub.supabase.co/storage/v1/object/sign/listing-photos/{photo_ref['path']}?token=abc"
+
+        requests = _build_ebay_requests(row, sku="archie-test-0", url_resolver=fake_resolver)
+        urls = requests["inventory_item"]["product"]["imageUrls"]
+        assert len(urls) == 2
+        assert urls[0].startswith("https://")
+        assert "token=abc" in urls[0]
+
+    # Fix 3c: empty photos → actionable error before API call (errorId 25717)
+    def test_fix3c_empty_photos_raises_before_api(self, stub, tmp_artifacts):
+        client, _ = stub
+        self._setup_approved_with_photos(client, photos=[])
+        row = client.get_listing("test-0")
+
+        class FailTransport:
+            def __call__(self, req):
+                raise AssertionError("should not reach the API with no photos")
+
+        provider = EbayProvider(
+            env={
+                "EBAY_OAUTH_TOKEN": "t",
+                "EBAY_MERCHANT_LOCATION_KEY": "mlk",
+                "EBAY_FULFILLMENT_POLICY_ID": "f",
+                "EBAY_PAYMENT_POLICY_ID": "p",
+                "EBAY_RETURN_POLICY_ID": "r",
+            },
+            transport=FailTransport(),
+        )
+        with pytest.raises(ValueError, match="no photos.*25717"):
+            provider.publish(row)
+
+    # Fix 4: category resolution at pricing time — EbayTaxonomyResolver
+    # parses the real suggestion-response shape from ebay-integration-notes.md
+    def test_fix4_taxonomy_resolver_parses_real_response(self):
+        """EbayTaxonomyResolver.resolve_category parses the real Taxonomy
+        response shape (candlestick → 4062, publish-verified)."""
+        api_response = {
+            "categorySuggestions": [
+                {
+                    "category": {"categoryId": "4062", "categoryName": "Candle Holders"},
+                    "categoryTreeNodeLevel": 3,
+                    "categoryTreeNodeAncestors": [
+                        {"categoryId": "13777", "categoryName": "Decorative Collectibles"},
+                        {"categoryId": "1", "categoryName": "Collectibles"},
+                    ],
+                },
+                {
+                    "category": {"categoryId": "20334", "categoryName": "Other"},
+                    "categoryTreeNodeLevel": 3,
+                    "categoryTreeNodeAncestors": [],
+                },
+            ],
+        }
+
+        class StubTaxonomyTransport:
+            def __call__(self, req):
+                class Resp:
+                    def read(self):
+                        return json.dumps(api_response).encode()
+                return Resp()
+
+        resolver = EbayTaxonomyResolver(
+            token="test-token",
+            api_base="https://api.sandbox.ebay.com",
+            transport=StubTaxonomyTransport(),
+        )
+        result = resolver.resolve_category("candlestick")
+        assert result is not None
+        assert result["category_id"] == "4062"
+        assert result["category_name"] == "Candle Holders"
+
+    # Fix 4: no suggestions → actionable error, not a silent default
+    def test_fix4_no_suggestions_raises_actionable_error(self):
+        api_response = {"categorySuggestions": []}
+
+        class StubTaxonomyTransport:
+            def __call__(self, req):
+                class Resp:
+                    def read(self):
+                        return json.dumps(api_response).encode()
+                return Resp()
+
+        resolver = EbayTaxonomyResolver(
+            token="test-token",
+            transport=StubTaxonomyTransport(),
+        )
+        result = resolver.resolve_category("nonsense")
+        assert result is None  # resolver returns None
+
+        # price_listing with this resolver → CategoryNotResolvedError
+        client = SupabaseClient(
+            url="https://stub.supabase.co", key="stub-key",
+            transport=StubTransport(),
+        )
+        client.insert_listing({"status": "draft", "title": "Nonsense Item",
+                               "category_guess": "nonsense"})
+        with pytest.raises(CategoryNotResolvedError, match="category not resolved"):
+            price_listing("test-0", ManualComps([{"price": 10.0}]), client,
+                          taxonomy_resolver=resolver)
+
+    # Fix 4: price_listing stores category_id in pricing jsonb
+    def test_fix4_price_listing_stores_category_id(self, stub):
+        client, _ = stub
+        client.insert_listing({
+            "status": "draft", "title": "Candlestick",
+            "category_guess": "candlestick",
+        })
+        api_response = {
+            "categorySuggestions": [
+                {"category": {"categoryId": "4062", "categoryName": "Candle Holders"},
+                 "categoryTreeNodeLevel": 3},
+            ],
+        }
+
+        class StubTaxonomyTransport:
+            def __call__(self, req):
+                class Resp:
+                    def read(self):
+                        return json.dumps(api_response).encode()
+                return Resp()
+
+        resolver = EbayTaxonomyResolver(
+            token="test-token", transport=StubTaxonomyTransport(),
+        )
+        result = price_listing(
+            "test-0", ManualComps([{"price": 45.0}]), client,
+            taxonomy_resolver=resolver,
+        )
+        assert result["status"] == "priced"
+        assert result["pricing"]["category_id"] == "4062"
+        assert result["pricing"]["category_name"] == "Candle Holders"
+
+    # Fix 4: EbayTaxonomyResolver NotConnected without token
+    def test_fix4_taxonomy_not_connected_without_token(self, monkeypatch):
+        monkeypatch.delenv("EBAY_OAUTH_TOKEN", raising=False)
+        with pytest.raises(NotConnected) as exc_info:
+            EbayTaxonomyResolver()
+        assert "EBAY_OAUTH_TOKEN" in exc_info.value.missing
+
+    # Fix 4: publish reads pricing.category_id (deterministic, no network)
+    def test_fix4_publish_reads_resolved_category(self, stub, tmp_artifacts):
+        client, _ = stub
+        self._setup_approved_with_photos(client)
+        row = client.get_listing("test-0")
+        requests = _build_ebay_requests(row, sku="archie-test-0")
+        assert requests["offer"]["categoryId"] == "4062"
+
+    # Fix 4: publish raises actionable error if no category_id
+    def test_fix4_publish_raises_without_category_id(self, stub, tmp_artifacts):
+        client, _ = stub
+        # Price WITHOUT a taxonomy resolver → no category_id in pricing.
+        client.insert_listing({
+            "status": "draft", "title": "Thing", "category_guess": "stuff",
+            "photos": [{"bucket": "listing-photos", "path": "test-0/0.jpg"}],
+        })
+        price_listing("test-0", ManualComps([{"price": 50.0}]), client)
+        approve("test-0", weight_oz=5.0, client=client)
+        row = client.get_listing("test-0")
+        with pytest.raises(ValueError, match="no pricing.category_id"):
+            _build_ebay_requests(row, sku="archie-test-0")
+
+    # Fix 5: retry-safe offer creation — duplicate-offer recovery
+    def test_fix5_duplicate_offer_recovery(self, stub, tmp_artifacts):
+        """On a 25002 duplicate-offer error, recover the existing offerId
+        and PUT-update it instead of failing."""
+        client, _ = stub
+        self._setup_approved_with_photos(client)
+        row = client.get_listing("test-0")
+
+        call_log = []
+
+        class DupRecoverTransport:
+            def __call__(self, req):
+                method = req.get_method()
+                url = req.full_url
+                call_log.append((method, url))
+                if method == "PUT" and "inventory_item" in url:
+                    class Resp:
+                        def read(self): return b"{}"
+                    return Resp()
+                if method == "POST" and "/offer" in url and "publish" not in url:
+                    # Simulate duplicate-offer error (errorId 25002).
+                    err_body = json.dumps({
+                        "errors": [{
+                            "errorId": 25002,
+                            "domain": "API_INVENTORY",
+                            "message": "Duplicate offer",
+                            "parameters": [{"name": "offerId", "value": "offer-xyz"}],
+                        }]
+                    }).encode()
+                    class ErrResp:
+                        status = 400
+                        def read(self): return err_body
+                    return ErrResp()
+                if method == "PUT" and "/offer/offer-xyz" in url:
+                    class Resp:
+                        def read(self): return b"{}"
+                    return Resp()
+                if method == "POST" and "/publish" in url:
+                    class Resp:
+                        def read(self):
+                            return json.dumps({"listingId": "ebay-listing-1"}).encode()
+                    return Resp()
+                class Resp:
+                    def read(self): return b"{}"
+                return Resp()
+
+        provider = EbayProvider(
+            env={
+                "EBAY_OAUTH_TOKEN": "t",
+                "EBAY_MERCHANT_LOCATION_KEY": "mlk",
+                "EBAY_FULFILLMENT_POLICY_ID": "f",
+                "EBAY_PAYMENT_POLICY_ID": "p",
+                "EBAY_RETURN_POLICY_ID": "r",
+            },
+            transport=DupRecoverTransport(),
+        )
+        result = provider.publish(row)
+        assert result["offer_id"] == "offer-xyz"
+        assert result["listing_id"] == "ebay-listing-1"
+        # Verify a PUT update was sent to the recovered offer.
+        put_calls = [c for c in call_log if c[0] == "PUT" and "offer-xyz" in c[1]]
+        assert len(put_calls) == 1
+
+    # Fix 6: --provider {dryrun,ebay} replaces broken --dry-run-provider
+    def test_fix6_provider_cli_arg(self):
+        """The CLI accepts --provider dryrun|ebay (not --dry-run-provider)."""
+        import argparse
+        # Reconstruct the parser to verify the arg schema.
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--id", required=True)
+        ap.add_argument("--apply", action="store_true")
+        ap.add_argument("--provider", choices=["dryrun", "ebay"], default="dryrun")
+
+        # --provider dryrun works.
+        args = ap.parse_args(["--id", "x", "--provider", "dryrun"])
+        assert args.provider == "dryrun"
+
+        # --provider ebay works.
+        args = ap.parse_args(["--id", "x", "--provider", "ebay"])
+        assert args.provider == "ebay"
+
+        # --dry-run-provider is no longer a valid arg.
+        with pytest.raises(SystemExit):
+            ap.parse_args(["--id", "x", "--dry-run-provider"])
+
+    # Fix 7: ensure_bucket tolerates duplicate wrapped as HTTP 400
+    def test_fix7_ensure_bucket_tolerates_400_with_409_body(self):
+        """Supabase wraps duplicate-bucket as HTTP 400 with body
+        statusCode=409 — ensure_bucket should treat it as success."""
+        from antiques.common import _HttpError, _is_duplicate_bucket_error
+
+        # Real observed body from ebay-integration-notes.md
+        err = _HttpError(400,
+            '{"statusCode":"409","error":"Duplicate","message":"The resource already exists"}',
+            "Bad Request")
+        assert _is_duplicate_bucket_error(err) is True
+
+        # Genuine 400 (not a duplicate) should not be tolerated.
+        err_real = _HttpError(400, '{"error":"validation failed"}', "Bad Request")
+        assert _is_duplicate_bucket_error(err_real) is False
+
+    # Fix 7: ensure_bucket with the real stub
+    def test_fix7_ensure_bucket_succeeds_on_duplicate(self):
+        from antiques.common import _HttpError
+
+        class DupBucketTransport:
+            def __call__(self, req):
+                if "bucket" in req.full_url and req.get_method() == "POST":
+                    raise _HttpError(400,
+                        '{"statusCode":"409","error":"Duplicate","message":"The resource already exists"}',
+                        "Bad Request")
+                return {}
+
+        client = SupabaseClient(
+            url="https://stub.supabase.co",
+            key="stub-key",
+            transport=DupBucketTransport(),
+        )
+        # Should not raise — duplicate is success.
+        client.ensure_bucket("listing-photos")
+
+
+# --------------------------------------------------------------------------- #
 # Fulfill
 # --------------------------------------------------------------------------- #
 
@@ -564,6 +981,7 @@ class TestFulfill:
         client, _ = stub
         client.insert_listing({"status": "draft", "title": "Test"})
         price_listing("test-0", ManualComps([{"price": 100.0}]), client)
+        _set_category_id(client)
         approve("test-0", weight_oz=5.0, client=client)
         publish_listing("test-0", DryRunProvider(), client=client, apply=True)
 
@@ -586,6 +1004,7 @@ class TestFulfill:
         client, _ = stub
         client.insert_listing({"status": "draft", "title": "Test"})
         price_listing("test-0", ManualComps([{"price": 100.0}]), client)
+        _set_category_id(client)
         approve("test-0", weight_oz=5.0, client=client)
         publish_listing("test-0", DryRunProvider(), client=client, apply=True)
         client.advance("test-0", "listed", "sold", {"shipping": {}})

@@ -25,7 +25,7 @@ import os
 import sys
 import urllib.parse
 import urllib.request
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from antiques.approve import mark_applied, read_marker, validate_marker
 from antiques.common import IllegalTransition, SupabaseClient, _now_iso
@@ -92,6 +92,11 @@ class EbayProvider:
     Requires EBAY_OAUTH_TOKEN, EBAY_MERCHANT_LOCATION_KEY, and the three
     policy IDs. Without them → ``NotConnected`` at construction.
     The ``transport`` is injectable for tests.
+
+    ``url_resolver`` is an optional callable ``(photo_ref) -> https_url`` that
+    resolves Storage photo refs to signed URLs at publish time.  The host-side
+    CLI wires one backed by ``SupabaseClient.signed_url``.  When ``None``, the
+    raw storage paths are used (for tests that don't need real URLs).
     """
 
     def __init__(
@@ -100,6 +105,7 @@ class EbayProvider:
         transport=None,
         env: dict[str, str] | None = None,
         api_base: str | None = None,
+        url_resolver: Callable[[dict[str, Any]], str] | None = None,
     ):
         env = env if env is not None else dict(os.environ)
         missing = [k for k in EBAY_PUBLISH_ENV if not env.get(k)]
@@ -113,6 +119,7 @@ class EbayProvider:
         self.return_policy_id = env["EBAY_RETURN_POLICY_ID"]
         self.api_base = (api_base or env.get("EBAY_API_BASE", EBAY_API_BASE_DEFAULT)).rstrip("/")
         self.transport = transport or _default_ebay_transport
+        self.url_resolver = url_resolver
 
     def _headers(self, *, json_body: bool = False) -> dict[str, str]:
         h = {
@@ -122,15 +129,25 @@ class EbayProvider:
         }
         if json_body:
             h["Content-Type"] = "application/json"
+            h["Content-Language"] = "en-US"
         return h
 
     def publish(self, row: dict[str, Any]) -> dict[str, Any]:
         import urllib.request as ur
 
         sku = f"archie-{row['id']}"
-        requests = _build_ebay_requests(row, sku=sku, provider=self)
+        photos = row.get("photos") or []
+        if not photos:
+            raise ValueError(
+                f"listing {row.get('id', '?')} has no photos — eBay hard-rejects "
+                f"empty imageUrls (errorId 25717). Photos must exist BEFORE "
+                f"approve; the approve marker digests photo count."
+            )
+        requests = _build_ebay_requests(
+            row, sku=sku, provider=self, url_resolver=self.url_resolver,
+        )
 
-        # 1. Create inventory item
+        # 1. Create (or update) inventory item
         req1 = ur.Request(
             f"{self.api_base}/sell/inventory/v1/inventory_item/{urllib.parse.quote(sku)}",
             data=json.dumps(requests["inventory_item"]).encode(),
@@ -139,16 +156,10 @@ class EbayProvider:
         )
         self.transport(req1)
 
-        # 2. Create offer
-        req2 = ur.Request(
-            f"{self.api_base}/sell/inventory/v1/offer",
-            data=json.dumps(requests["offer"]).encode(),
-            method="POST",
-            headers=self._headers(json_body=True),
-        )
-        resp2 = self.transport(req2)
-        data2 = _read_resp(resp2)
-        offer_id = data2.get("offerId", "") if isinstance(data2, dict) else ""
+        # 2. Create offer (retry-safe: if a duplicate offer already exists from
+        #    a failed prior run, recover the existing offerId and PUT-update it
+        #    instead of failing).
+        offer_id = self._create_or_recover_offer(sku, requests["offer"])
 
         # 3. Publish
         req3 = ur.Request(
@@ -169,6 +180,72 @@ class EbayProvider:
             "published_at": _now_iso(),
         }
 
+    def _create_or_recover_offer(self, sku: str, offer_body: dict[str, Any]) -> str:
+        """POST the offer; on a duplicate-offer error (25002 family), recover
+        the existing offerId (from the error body or a GET by SKU), PUT-update
+        it, and return the recovered id.  This prevents stranded offers after
+        a step-3 failure leaves an offer behind."""
+        import urllib.request as ur
+
+        req2 = ur.Request(
+            f"{self.api_base}/sell/inventory/v1/offer",
+            data=json.dumps(offer_body).encode(),
+            method="POST",
+            headers=self._headers(json_body=True),
+        )
+        resp2 = self.transport(req2)
+        data2 = _read_resp(resp2)
+        if isinstance(data2, dict) and data2.get("offerId"):
+            return data2["offerId"]
+
+        # Duplicate-offer recovery: eBay returns errorId 25002 with the
+        # existing offerId in the error parameters, or we can GET it by SKU.
+        if isinstance(data2, dict) and self._is_duplicate_offer_error(data2):
+            offer_id = _extract_offer_id_from_error(data2)
+            if not offer_id:
+                offer_id = self._get_offer_id_by_sku(sku)
+            if offer_id:
+                # PUT-update the existing offer with the current body.
+                put_req = ur.Request(
+                    f"{self.api_base}/sell/inventory/v1/offer/{urllib.parse.quote(offer_id)}",
+                    data=json.dumps(offer_body).encode(),
+                    method="PUT",
+                    headers=self._headers(json_body=True),
+                )
+                self.transport(put_req)
+                return offer_id
+
+        # Unexpected response — let the caller see the error.
+        raise RuntimeError(f"create offer: unexpected response: {data2}")
+
+    @staticmethod
+    def _is_duplicate_offer_error(data: dict[str, Any]) -> bool:
+        errors = data.get("errors", [])
+        if not isinstance(errors, list):
+            return False
+        for err in errors:
+            if isinstance(err, dict) and err.get("errorId") in (25002, 25003):
+                return True
+        return False
+
+    def _get_offer_id_by_sku(self, sku: str) -> str:
+        """GET /sell/inventory/v1/offer?sku=<sku> to find an existing offer."""
+        import urllib.request as ur
+        req = ur.Request(
+            f"{self.api_base}/sell/inventory/v1/offer?sku={urllib.parse.quote(sku)}",
+            method="GET",
+            headers=self._headers(),
+        )
+        resp = self.transport(req)
+        data = _read_resp(resp)
+        if isinstance(data, dict):
+            offers = data.get("offers", [])
+            if isinstance(offers, list) and offers:
+                first = offers[0]
+                if isinstance(first, dict):
+                    return first.get("offerId", "")
+        return ""
+
 
 # --------------------------------------------------------------------------- #
 # Request builders (shared by EbayProvider and DryRunProvider)
@@ -179,23 +256,31 @@ def _build_ebay_requests(
     *,
     sku: str | None = None,
     provider: "EbayProvider | None" = None,
+    url_resolver: Callable[[dict[str, Any]], str] | None = None,
 ) -> dict[str, Any]:
     """Build the eBay API request payloads (inventory item + offer).
 
     Used by both EbayProvider (sends them) and DryRunProvider (records them).
+    ``url_resolver``: when provided (EbayProvider with a SupabaseClient-backed
+    resolver), each photo ref is resolved to a real signed https URL.  When
+    ``None`` (DryRunProvider / tests), placeholder ``supabase://`` URLs are
+    recorded instead — no network.
     """
     sku = sku or f"archie-{row.get('id', 'unknown')}"
     pricing = row.get("pricing") or {}
     price = pricing.get("recommended") or 0.0
     photos = row.get("photos") or []
 
-    # Image URLs: in a full deployment these would be Supabase Storage signed
-    # URLs. For the request shape, we use the storage paths as placeholders —
-    # the host-side caller would resolve signed URLs before calling publish.
-    image_urls = [
-        f"supabase://{p.get('bucket', 'listing-photos')}/{p.get('path', '')}"
-        for p in photos if isinstance(p, dict)
-    ]
+    if url_resolver:
+        image_urls = [
+            url_resolver(p)
+            for p in photos if isinstance(p, dict)
+        ]
+    else:
+        image_urls = [
+            f"supabase://{p.get('bucket', 'listing-photos')}/{p.get('path', '')}"
+            for p in photos if isinstance(p, dict)
+        ]
 
     inventory_item = {
         "product": {
@@ -217,7 +302,7 @@ def _build_ebay_requests(
         "pricingSummary": {
             "price": {"value": str(price), "currency": "USD"},
         },
-        "categoryId": _guess_category_id(row),
+        "categoryId": _resolve_category_id(row),
     }
     if provider:
         offer["merchantLocationKey"] = provider.merchant_location_key
@@ -238,15 +323,20 @@ def _build_ebay_requests(
 
 
 def _build_aspects(row: dict[str, Any]) -> dict[str, Any]:
+    """Build product.aspects from appraisal + category_guess.
+
+    eBay requires every aspect value to be a ``list[str]`` (errorId 2004 if a
+    bare string is sent). We wrap each value in a single-element list.
+    """
     aspects: dict[str, Any] = {}
     appraisal = row.get("appraisal")
     if isinstance(appraisal, dict):
         if appraisal.get("era"):
-            aspects["Decade"] = str(appraisal["era"])
+            aspects["Decade"] = [str(appraisal["era"])]
         if appraisal.get("brand"):
-            aspects["Brand"] = str(appraisal["brand"])
+            aspects["Brand"] = [str(appraisal["brand"])]
     if row.get("category_guess"):
-        aspects["Type"] = row["category_guess"]
+        aspects["Type"] = [str(row["category_guess"])]
     return aspects
 
 
@@ -267,17 +357,54 @@ def _map_condition(row: dict[str, Any]) -> str:
     return "USED_EXCELLENT"
 
 
-def _guess_category_id(row: dict[str, Any]) -> str:
-    """Best-effort eBay category ID from category_guess."""
-    cat = (row.get("category_guess") or "").lower()
-    # A few well-known eBay category IDs.
-    return {
-        "watches": "31387",
-        "cards": "26395",
-        "furniture": "3192",
-        "coins": "11116",
-        "books": "267",
-    }.get(cat, "1")  # "1" = collectibles default
+def _resolve_category_id(row: dict[str, Any]) -> str:
+    """Resolve the eBay leaf categoryId for the offer payload.
+
+    Per the category-strategy council decision (option b), the leaf category
+    is resolved at PRICING time via Taxonomy ``get_category_suggestions`` and
+    stored in ``pricing.category_id``.  Morley sees it at the approve gate and
+    can correct it.  Publish is deterministic — no network calls here.
+
+    If the pricing jsonb has no ``category_id`` (pricing ran without a
+    TaxonomyResolver, or resolution returned nothing), this raises an
+    actionable error telling the operator exactly what to set — never a silent
+    default to ``"1"`` (which is a non-leaf node and triggers errorId 25005 at
+    publishOffer).
+    """
+    pricing = row.get("pricing")
+    if isinstance(pricing, dict):
+        cat_id = pricing.get("category_id")
+        if cat_id:
+            return str(cat_id)
+    raise ValueError(
+        f"listing {row.get('id', '?')} has no pricing.category_id — "
+        f"the leaf category was not resolved at pricing time. "
+        f"Re-price with a TaxonomyResolver, or set category_id manually "
+        f"in the pricing jsonb (e.g. via approve with price_override). "
+        f"Do NOT use '1' — it is a non-leaf node (errorId 25005)."
+    )
+
+
+def _extract_offer_id_from_error(data: dict[str, Any]) -> str:
+    """Extract an existing offerId from a duplicate-offer error body.
+
+    eBay's 25002 error carries the existing offerId in the error parameters
+    (name 'offerId' or embedded in a message).  Returns '' if not found.
+    """
+    errors = data.get("errors", [])
+    if not isinstance(errors, list):
+        return ""
+    for err in errors:
+        if not isinstance(err, dict):
+            continue
+        params = err.get("parameters", [])
+        if isinstance(params, list):
+            for p in params:
+                if isinstance(p, dict) and p.get("name") in ("offerId", "offer_id"):
+                    val = p.get("value", "")
+                    if val:
+                        return str(val)
+    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -365,15 +492,22 @@ def main():
     ap.add_argument("--id", required=True, help="listing row id")
     ap.add_argument("--apply", action="store_true",
                     help="actually publish (default: dry-run)")
-    ap.add_argument("--dry-run-provider", action="store_true", default=True,
-                    help="use DryRunProvider (default; eBay not connected yet)")
+    ap.add_argument("--provider", choices=["dryrun", "ebay"], default="dryrun",
+                    help="listing provider to use (default: dryrun)")
     args = ap.parse_args()
 
     try:
-        if args.dry_run_provider:
-            provider = DryRunProvider()
+        if args.provider == "ebay":
+            # Wire a SupabaseClient-backed URL resolver for photo signed URLs.
+            from antiques.common import SupabaseClient
+            supa = SupabaseClient()
+
+            def resolver(photo_ref: dict[str, Any]) -> str:
+                return supa.signed_url(photo_ref.get("path", ""))
+
+            provider = EbayProvider(url_resolver=resolver)
         else:
-            provider = EbayProvider()
+            provider = DryRunProvider()
 
         result = publish_listing(args.id, provider, apply=args.apply)
         print(json.dumps(result, indent=2, default=str))
@@ -396,4 +530,6 @@ __all__ = [
     "EbayProvider",
     "NotConnected",
     "publish_listing",
+    "_build_ebay_requests",
+    "_resolve_category_id",
 ]
