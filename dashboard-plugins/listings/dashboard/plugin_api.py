@@ -46,6 +46,14 @@ _load_env()
 # Re-export common client (stdlib-only, same as the pipeline).
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# The dashboard mounts this file from ~/.hermes/plugins (symlinked); the repo
+# root is NOT on sys.path there. Resolve it relative to this file's REAL path
+# (resolve() follows the symlink) so `antiques` imports in any context.
+import sys as _sys
+from pathlib import Path as _Path
+_repo_root = str(_Path(__file__).resolve().parents[3])
+if _repo_root not in _sys.path:
+    _sys.path.insert(0, _repo_root)
 from antiques.common import SupabaseClient  # noqa: E402
 
 STATUS_ORDER = ["draft", "priced", "approved", "listed", "sold", "shipped", "rejected", "error"]
