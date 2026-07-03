@@ -8,7 +8,10 @@ Used by Stage 2 checkpoints (full panel, forced by the driver) and Stage 1 forks
 CLI:  python3 fusion.py [--preset budget] "QUESTION"   (context on stdin)
 """
 import json, os, sys, re, urllib.request, concurrent.futures as cf
+# port/ resolves relative to THIS file first (works in any checkout/CI), with the
+# live ~/harness/port as fallback for callers that import a copied fusion.py.
 sys.path.insert(0, os.path.join(os.path.expanduser("~/harness"), "port"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "port"))
 import harness_ledger as hl  # noqa: E402  (CircuitOpen + cost gating)
 
 OR_URL = "https://openrouter.ai/api/v1/chat/completions"

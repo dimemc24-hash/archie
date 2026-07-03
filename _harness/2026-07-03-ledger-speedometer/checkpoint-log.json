@@ -1,0 +1,21 @@
+[
+  {
+    "checkpoint": "delta-attribution",
+    "question": "The OpenRouter credits delta measured around a build segment is ACCOUNT-level: concurrent spend (Archie's Telegram chat, a parallel run, the Fusion council itself) lands inside whatever segment is being metered. Options: (a) charge the full delta to the running segment \u2014 overcounts under concurrency, so per-run and daily breakers trip EARLY (safe direction), simplest code, and the account-level total is always honest; (b) charge min(delta, k\u00d7estimate) to the segment and book any excess as a separate role='account-drift' ledger row \u2014 cleaner per-run attribution, slightly more code, k needs choosing; (c) keep estimates on segment rows and use credits purely for an account-level floor/alarm \u2014 zero false attribution but per-run caps stay blind, which is how $77 escaped. Given the breaker's purpose is stopping runaway spend (not accounting precision), which attribution?",
+    "synthesis": "Charge the full delta to the running segment (Option a). This trips breaker early under concurrency\u2014safe for runaway prevention\u2014keeps code simplest, and maintains an honest account-level total. The breaker is a blunt safety instrument; early trip is the correct conservative direction.",
+    "contradictions": [],
+    "blindspots": [
+      "No mitigation strategy for false positives (e.g., manual override or bypass) has been defined, risking alert fatigue and eventual breaker disablement.",
+      "The possibility of a high k value in Option (b) to filter out minor background concurrency while still catching massive escapes was not explored; it could offer a middle ground.",
+      "The scale at which concurrent account activity makes Option (a) completely unusable (constant false trips) is not addressed, potentially limiting its viability in high-usage scenarios."
+    ],
+    "fallback": false,
+    "manifest_gap": false,
+    "resumed_sid": "20260703_061313_7385e9"
+  },
+  {
+    "checkpoint": "delta-attribution",
+    "deduped": true,
+    "resumed_sid": "20260703_061634_30e8e0"
+  }
+]
