@@ -1,0 +1,33 @@
+[
+  {
+    "checkpoint": "image-persistence",
+    "question": "Telegram photos land as files inside the sandboxed chat container, whose filesystem is ephemeral \u2014 but eBay needs the images days later at publish time, and the dashboard needs them for review. Options: (a) capture.py uploads every photo to the private Supabase Storage bucket at capture time (durable immediately, costs upload on every capture including never-approved drafts); (b) store container paths only and have a host-side worker re-fetch from Telegram by file_id later (no sandbox upload, but Telegram file_ids expire and the host worker needs bot-token access + more moving parts); (c) hybrid \u2014 capture uploads thumbnails only, full-res re-fetched at approve time. Which persistence model, considering the sandbox's stdlib-only constraint and that a failed upload must not lose the listing?",
+    "synthesis": "Select option (a): capture-time full upload to Supabase Storage. This provides immediate durability, avoids Telegram file_id expiry, and stays within the sandbox's stdlib-only constraint. To prevent image loss on upload failure inside the ephemeral sandbox, the capture.py implementation must buffer the raw image bytes durably (e.g., as a base64 blob stored immediately in the listing's `notes` field or a host-side staging table) before returning the upload_failed status. This ensures a host-side retry worker can recover the image without relying on the sandbox's local filesystem, which disappears on container exit.",
+    "contradictions": [
+      "Advisor 1 assumed that a local fallback path in the sandbox (e.g., /tmp) is sufficient for retry, while Advisors 2 and 3 correctly flagged that the sandbox is ephemeral and the local file would be lost on termination, making the fallback non-viable without an explicit buffer step."
+    ],
+    "blindspots": [
+      "The exact mechanism for safely transferring failed-upload image bytes from the ephemeral sandbox to a durable host-side store is not specified. The team must design a buffer (e.g., base64-encode bytes into the listing's `notes` JSON or write to a dedicated staging table) that capture.py executes atomically before reporting upload_failed, so that no images are stranded in the dying sandbox.",
+      "The host-side retry worker's design, scheduling, and timeout relative to the container lifecycle are unspecified, which could lead to images being never rescued if the buffer strategy is not correctly implemented.",
+      "The cost and latency of base64 encoding large full-resolution photos inside the stdlib-only Python sandbox (without libraries) are unexamined; a pure-Python implementation may be slow and consume memory, potentially causing captures to block."
+    ],
+    "fallback": false,
+    "manifest_gap": false,
+    "resumed_sid": "20260703_044548_564d6d"
+  },
+  {
+    "checkpoint": "capture-boundary",
+    "question": "The sandboxed capture skill can reach only Supabase REST. How much should it do itself? Options: (a) full capture \u2014 uploads photos, writes the complete draft row (title/description/appraisal), one-shot, no host involvement until pricing; (b) thin queue \u2014 write a minimal capture-request row (like the spec-intake bridge) and let a host cron enrich/normalize it into a draft (more robust validation and secrets stay host-side, but adds a worker + latency and the sandbox already holds the Supabase service key anyway); (c) full capture plus a host-side validation pass that quarantines malformed rows. Which boundary, given the service key is already forwarded to the sandbox and the row is reviewed by a human before anything irreversible?",
+    "synthesis": "Choose (a) full capture. The sandbox already holds the Supabase service key, so a host-side worker or quarantine adds latency and operational complexity without reducing exposure. Human review before pricing is the final gating step, and the sandbox\u2019s stdlib-based photo buffering already degrades gracefully. Adding a validation pass risks quarantining legitimate data and clutters the architecture with host-side coupling. Stay simple, rely on the human reviewer as the sole quality gate, and keep the capture path single\u2011shot.",
+    "contradictions": [
+      "Whether a host-side validation quarantine (c) is necessary to catch malformed AI output before it reaches the human reviewer, or whether human review alone (a) is a sufficient filter for all data anomalies."
+    ],
+    "blindspots": [
+      "Privilege minimization: using Supabase Row-Level Security (RLS) or schema\u2011restricted roles to limit the sandbox\u2019s write blast radius was not considered; the service key\u2019s full write access is accepted as a given.",
+      "Human reviewer fatigue under high submission volumes or subtly corrupted data could cause critical errors to be overlooked, undermining the assumption that human review always catches malformed rows."
+    ],
+    "fallback": false,
+    "manifest_gap": false,
+    "resumed_sid": "20260703_045214_b63011"
+  }
+]

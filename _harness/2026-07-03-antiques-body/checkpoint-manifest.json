@@ -1,0 +1,18 @@
+{
+  "checkpoints": [
+    {
+      "id": "image-persistence",
+      "trigger": "before implementing photo handling in capture.py / common.py",
+      "question": "Telegram photos land as files inside the sandboxed chat container, whose filesystem is ephemeral \u2014 but eBay needs the images days later at publish time, and the dashboard needs them for review. Options: (a) capture.py uploads every photo to the private Supabase Storage bucket at capture time (durable immediately, costs upload on every capture including never-approved drafts); (b) store container paths only and have a host-side worker re-fetch from Telegram by file_id later (no sandbox upload, but Telegram file_ids expire and the host worker needs bot-token access + more moving parts); (c) hybrid \u2014 capture uploads thumbnails only, full-res re-fetched at approve time. Which persistence model, considering the sandbox's stdlib-only constraint and that a failed upload must not lose the listing?",
+      "on_synthesis": "implement exactly the chosen persistence model in capture.py/common.py, including its failure mode (photo upload failure must degrade to a draft row with a noted gap, never a lost listing)",
+      "panel_override": "budget"
+    },
+    {
+      "id": "capture-boundary",
+      "trigger": "before finalizing the sandbox capture skill's scope",
+      "question": "The sandboxed capture skill can reach only Supabase REST. How much should it do itself? Options: (a) full capture \u2014 uploads photos, writes the complete draft row (title/description/appraisal), one-shot, no host involvement until pricing; (b) thin queue \u2014 write a minimal capture-request row (like the spec-intake bridge) and let a host cron enrich/normalize it into a draft (more robust validation and secrets stay host-side, but adds a worker + latency and the sandbox already holds the Supabase service key anyway); (c) full capture plus a host-side validation pass that quarantines malformed rows. Which boundary, given the service key is already forwarded to the sandbox and the row is reviewed by a human before anything irreversible?",
+      "on_synthesis": "implement exactly the chosen boundary across capture.py and (if chosen) the host-side worker, and reflect it in SKILL.md and README.md",
+      "panel_override": "budget"
+    }
+  ]
+}
