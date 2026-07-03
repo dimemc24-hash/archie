@@ -30,7 +30,7 @@ for ref in $(git -C "$REPO" for-each-ref --format='%(refname:short)' 'refs/remot
   fixes="$(printf '%s' "$rep" | python3 -c "import sys,json;print(json.load(sys.stdin).get('fixes_committed','?'))" 2>/dev/null || echo '?')"
   # Route the hivemind's signal to ARCHIE + review (NOT into the swarm critics): gate status + the
   # builder's own flagged uncertainty (FALLBACK checkpoints + a blindspot), distilled from checkpoint-log.
-  gate="$(printf '%s' "$rep" | python3 -c "import sys,json;d=json.load(sys.stdin);print(('gated ✓ '+str(d.get('checkpoints_consulted',0))+' checkpoints') if d.get('hivemind_gated') else '⚠️ NOT hivemind-gated (borrow/skip)')" 2>/dev/null || echo '')"
+  gate="$(printf '%s' "$rep" | python3 -c "import sys,json;d=json.load(sys.stdin);print('' if d.get('hivemind_gated') else 'Heads up: this one skipped the hivemind gate.')" 2>/dev/null || echo '')"
   ck="$(git -C "$REPO" show "${ref}:_harness/${id}/checkpoint-log.json" 2>/dev/null)"
   flagged="$(printf '%s' "$ck" | python3 -c "
 import sys,json
@@ -47,7 +47,7 @@ if fb: parts.append('FALLBACK (no council): '+', '.join(fb))
 if bs: parts.append('blindspot: '+bs[0])
 print(' — '.join(parts))
 " 2>/dev/null || echo '')"
-  raw="🟢 Stage 4 ready: fix/${id} — build→swarm green, ${fixes} fixes committed${gate:+ · ${gate}}. ${flagged:+Builder flagged → ${flagged}. }Pull it, review the diff + _harness/${id}/ artifacts, then LAUNCH (merge → main) or loop back (new spec → Stage 2)."
+  raw="🟢 Boss — the ${id} build is back and it's clean: ${fixes} swarm fixes folded in. ${gate:+${gate} }${flagged:+The builder flagged something worth an eye: ${flagged}. }Ready for your look whenever — ask for the technical rundown if you want it."
   FILTER="$HOME/.hermes/skills/archie/persona/persona_filter.py"
   msg="$(printf '%s' "$raw" | python3 "$FILTER" 2>/dev/null)"; [ -z "$msg" ] && msg="$raw"
   curl -s "https://api.telegram.org/bot${TOKEN}/sendMessage" \
