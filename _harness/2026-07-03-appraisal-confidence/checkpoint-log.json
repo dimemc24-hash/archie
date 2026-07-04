@@ -1,0 +1,15 @@
+[
+  {
+    "checkpoint": "low-confidence-approve",
+    "question": "The approve gate is the pipeline's only quality check, and appraisals now carry {id, value} confidence of high|medium|low|unknown (absent = unknown). Morley's stated rule: 'I'd rather I-don't-know than wrong.' When Morley approves a listing whose confidence is not high/high, what should approve() do? Options: (a) WARN \u2014 record confidence in the approval jsonb and print a prominent warning line, but approve normally (fastest flow, but a warning in CLI output is easy to scroll past, and the dashboard approve path may not show stdout at all); (b) REQUIRE-ACK \u2014 approve() raises unless called with an explicit acknowledge_low_confidence=True (CLI flag --ack-low-confidence), forcing a conscious step; the ack is recorded in approval jsonb (one extra step only on flagged items, none on clean ones); (c) BLOCK below a floor \u2014 unknown/unknown or authenticity-flagged items cannot be approved until re-appraised (strongest protection, but Morley may legitimately want to sell an honestly-unknown item described as such). Which behavior, given the human IS the gate and the goal is preventing accidental approval of uncertain appraisals, not preventing deliberate ones?",
+    "synthesis": "When appraisals lack high/high confidence, approve() must raise unless called with acknowledge_low_confidence=True (--ack-low-confidence), and the ack is recorded in the approval jsonb. This prevents accidental approvals by forcing a conscious step, while still allowing deliberate decisions on 'honestly unknown' items. Clean high/high items are unaffected, and the audit trail supports accountability. This directly addresses Morley's preference for 'I-don't-know' over being wrong.",
+    "contradictions": [],
+    "blindspots": [
+      "Habituation: the ack could become a mindless routine if Morley scripts --ack-low-confidence globally or the dashboard defaults to a pre-checked box, rendering the guardrail ineffective.",
+      "Downstream visibility: approved low-confidence items may not be visibly flagged on the storefront, risking buyer misperception even though the approval was deliberate."
+    ],
+    "fallback": false,
+    "manifest_gap": false,
+    "resumed_sid": "20260704_024159_54f1cd"
+  }
+]

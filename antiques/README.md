@@ -34,6 +34,25 @@ sold → shipped (label purchased, tracking stored, Morley alerted)
 
 ## Council decisions (checkpoints)
 
+### appraisal-confidence — low-confidence guard on approve()
+
+When an appraisal lacks high/high confidence (identification + valuation),
+`approve()` raises `LowConfidenceError` unless called with
+`acknowledge_low_confidence=True` (CLI: `--ack-low-confidence`). The ack is
+recorded in the `approval` jsonb. This prevents accidental approvals by
+forcing a conscious step, while still allowing deliberate decisions on
+'honestly unknown' items. Clean high/high items are unaffected, and the audit
+trail supports accountability. This directly addresses Morley's preference for
+'I-don't-know' over being wrong.
+
+Blindspots respected:
+- Habituation: the ack could become a mindless routine if scripted globally
+  or defaulted to a pre-checked box. The guard is a speed-bump, not a wall —
+  its value is in the conscious choice, not in blocking.
+- Downstream visibility: approved low-confidence items may not be visibly
+  flagged on the storefront. The `approval.jsonb` records the confidence and
+  ack so the dashboard can surface this (future work).
+
 ### image-persistence — full capture-time upload
 
 Photos are uploaded to the private Supabase Storage bucket at capture time
@@ -122,10 +141,33 @@ leaf category at the approve gate. If resolution returns nothing, raises
 ### antiques/approve.py
 
 Human approval gate:
-- `approve(row_id, weight_oz, dims, price_override=None)` — validates status,
-  records approval jsonb, advances to `approved`, writes a pending-publish
-  marker to `~/harness/artifacts/antiques/<id>/pending-publish.json`.
+- `approve(row_id, weight_oz, dims, price_override=None,
+  acknowledge_low_confidence=False)` — validates status, records approval
+  jsonb, advances to `approved`, writes a pending-publish marker to
+  `~/harness/artifacts/antiques/<id>/pending-publish.json`.
+
+  **Confidence guard** (council decision `appraisal-confidence`): if the
+  listing's `appraisal.confidence` lacks high/high (identification +
+  valuation), `approve()` raises `LowConfidenceError` unless
+  `acknowledge_low_confidence=True` is passed. This forces a conscious step
+  on 'honestly unknown' items while keeping clean high/high items unaffected.
+  The actual confidence and the ack are both recorded in the `approval`
+  jsonb for auditability.
+
 - `reject(row_id, reason)` — advances to `rejected` with reason in notes.
+
+CLI:
+```bash
+# Approve a priced listing (high confidence — clean path)
+python3 -m antiques.approve --id <listing-id> --weight-oz 5.0 \
+  --dims '{"l":6,"w":4,"h":2}'
+
+# Approve a low-confidence listing deliberately
+python3 -m antiques.approve --id <listing-id> --weight-oz 5.0 --ack-low-confidence
+
+# Reject a listing
+python3 -m antiques.approve --id <listing-id> --reject "not authentic"
+```
 
 The marker is keyed to a digest of the row's title + price + photo count. If
 the row changes between approve and publish, the marker is stale and publish
@@ -197,25 +239,23 @@ c = SupabaseClient()
 price_listing('<listing-id>', ManualComps([{'price': 185.0}, {'price': 210.0}]), c)
 "
 
-# Approve a priced listing
-python3 -c "
-from antiques.common import SupabaseClient
-from antiques.approve import approve
-c = SupabaseClient()
-approve('<listing-id>', weight_oz=5.0, dims={'l': 6, 'w': 4, 'h': 2}, client=c)
-"
+# Approve a priced listing (high confidence — clean path)
+python3 -m antiques.approve --id <listing-id> --weight-oz 5.0 \
+  --dims '{"l": 6, "w": 4, "h": 2}'
+
+# Approve a low-confidence listing deliberately (council decision:
+# appraisal-confidence — forces a conscious ack for non-high/high items)
+python3 -m antiques.approve --id <listing-id> --weight-oz 5.0 --ack-low-confidence
+
+# Approve a draft with a manual price override
+python3 -m antiques.approve --id <listing-id> --weight-oz 5.0 --price-override 99.0
 
 # Publish (dry-run first, then apply with the eBay provider)
 python3 -m antiques.publish --id <listing-id>
 python3 -m antiques.publish --id <listing-id> --apply --provider ebay
 
 # Reject a listing
-python3 -c "
-from antiques.common import SupabaseClient
-from antiques.approve import reject
-c = SupabaseClient()
-reject('<listing-id>', 'not authentic', client=c)
-"
+python3 -m antiques.approve --id <listing-id> --reject "not authentic"
 ```
 
 ## eBay connect checklist
