@@ -1,0 +1,11 @@
+{
+  "checkpoints": [
+    {
+      "id": "low-confidence-approve",
+      "trigger": "before implementing approve() behavior for non-high appraisal confidence",
+      "question": "The approve gate is the pipeline's only quality check, and appraisals now carry {id, value} confidence of high|medium|low|unknown (absent = unknown). Morley's stated rule: 'I'd rather I-don't-know than wrong.' When Morley approves a listing whose confidence is not high/high, what should approve() do? Options: (a) WARN \u2014 record confidence in the approval jsonb and print a prominent warning line, but approve normally (fastest flow, but a warning in CLI output is easy to scroll past, and the dashboard approve path may not show stdout at all); (b) REQUIRE-ACK \u2014 approve() raises unless called with an explicit acknowledge_low_confidence=True (CLI flag --ack-low-confidence), forcing a conscious step; the ack is recorded in approval jsonb (one extra step only on flagged items, none on clean ones); (c) BLOCK below a floor \u2014 unknown/unknown or authenticity-flagged items cannot be approved until re-appraised (strongest protection, but Morley may legitimately want to sell an honestly-unknown item described as such). Which behavior, given the human IS the gate and the goal is preventing accidental approval of uncertain appraisals, not preventing deliberate ones?",
+      "on_synthesis": "implement exactly the chosen behavior in approve() and its CLI surface, record confidence + any acknowledgment in the approval jsonb, and cover both the flagged and clean paths in tests",
+      "panel_override": "budget"
+    }
+  ]
+}
