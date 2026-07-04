@@ -165,7 +165,7 @@ def _high_confidence_appraisal(era="1968", brand="Omega", condition="excellent")
         "era": era,
         "brand": brand,
         "condition": condition,
-        "confidence": {"identification": "high", "valuation": "high"},
+        "confidence": {"id": "high", "value": "high"},
     }
 
 
@@ -176,7 +176,7 @@ def _low_confidence_appraisal(era="1968", brand="Omega", condition="excellent",
         "era": era,
         "brand": brand,
         "condition": condition,
-        "confidence": {"identification": ident, "valuation": val},
+        "confidence": {"id": ident, "value": val},
     }
 
 
@@ -429,7 +429,7 @@ class TestApprove:
         assert result["approval"]["weight_oz"] == 5.0
         # Confidence is recorded in the approval jsonb.
         assert result["approval"]["appraisal_confidence"] == {
-            "identification": "high", "valuation": "high",
+            "id": "high", "value": "high",
         }
         assert result["approval"]["acknowledged_low_confidence"] is False
 
@@ -497,7 +497,7 @@ class TestApprove:
         # The ack and the actual confidence are both recorded.
         assert result["approval"]["acknowledged_low_confidence"] is True
         assert result["approval"]["appraisal_confidence"] == {
-            "identification": "low", "valuation": "medium",
+            "id": "low", "value": "medium",
         }
 
     def test_approve_no_appraisal_raises(self, stub, tmp_artifacts):
@@ -1178,3 +1178,12 @@ class TestFulfill:
         with pytest.raises(NotConnected) as exc_info:
             Shippo()
         assert "SHIPPO_API_KEY" in exc_info.value.missing
+
+
+def test_appraisal_confidence_accepts_legacy_keys():
+    """The live skill emits id/value; identification/valuation are aliases."""
+    from antiques.approve import _appraisal_confidence
+    legacy = {"appraisal": {"confidence": {"identification": "high", "valuation": "low"}}}
+    assert _appraisal_confidence(legacy) == ("high", "low")
+    current = {"appraisal": {"confidence": {"id": "high", "value": "high"}}}
+    assert _appraisal_confidence(current) == ("high", "high")

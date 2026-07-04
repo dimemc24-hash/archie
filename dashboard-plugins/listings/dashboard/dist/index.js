@@ -129,7 +129,15 @@
                             fontSize: "0.85rem",
                           },
                         },
-                          h("span", { style: { fontWeight: isSel ? 600 : 400 } }, item.title || item.id),
+                          h("span", { style: { fontWeight: isSel ? 600 : 400 } }, item.title || item.id,
+                            (function (c) {
+                              if (!c) return null;
+                              var parts = [];
+                              if (c.id !== "high") parts.push("id:" + c.id);
+                              if (c.value !== "high") parts.push("val:" + c.value);
+                              if (!parts.length) return null;
+                              return h("span", { style: { marginLeft: "0.4rem", fontSize: "0.7rem", fontWeight: 400, color: "#b45309", border: "1px solid #f59e0b", borderRadius: "0.375rem", padding: "0 0.3rem" } }, parts.join(" "));
+                            })(item.confidence)),
                           h("span", { style: { color: "#6b7280" } },
                             fmtPrice(item.price), " · ", item.n_photos, " 📷",
                           ),
@@ -181,6 +189,17 @@
           pricing.range ? h("span", null, fmtPrice(pricing.range.low) + " – " + fmtPrice(pricing.range.high)) : null,
           h("span", { style: { color: "#6b7280" } }, "Source:"),
           h("span", null, d.source || "—"),
+          h("span", { style: { color: "#6b7280" } }, "Confidence:"),
+          h("span", null, (function (c) {
+            c = c || {};
+            var idc = c.id || c.identification || "unknown";
+            var valc = c.value || c.valuation || "unknown";
+            var hot = idc !== "high" || valc !== "high";
+            var txt = "id:" + idc + " · val:" + valc;
+            if (c.basis) txt += " — " + c.basis;
+            if (c.flags && c.flags.length) txt += " [" + c.flags.join(", ") + "]";
+            return h("span", { style: hot ? { color: "#b45309", fontWeight: 600 } : {} }, txt);
+          })((d.appraisal || {}).confidence)),
           h("span", { style: { color: "#6b7280" } }, "Created:"),
           h("span", null, d.created_at ? timeAgo(new Date(d.created_at).getTime()) : "—"),
         ),

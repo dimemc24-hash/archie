@@ -77,8 +77,9 @@ def _appraisal_confidence(row: dict[str, Any]) -> tuple[str, str] | None:
     """Extract the (identification, valuation) confidence pair from the
     appraisal jsonb.
 
-    The appraisal skill produces a ``confidence`` object with ``identification``
-    and ``valuation`` keys (each ``high`` / ``medium`` / ``low`` / ``unknown``).
+    The appraisal skill produces a ``confidence`` object with ``id`` and
+    ``value`` keys (each ``high`` / ``medium`` / ``low`` / ``unknown``);
+    ``identification`` / ``valuation`` are accepted as legacy aliases.
     Returns ``None`` if no appraisal or no confidence structure is present —
     treated as 'unknown' (not high) by the guard.
     """
@@ -88,8 +89,8 @@ def _appraisal_confidence(row: dict[str, Any]) -> tuple[str, str] | None:
     conf = appraisal.get("confidence")
     if not isinstance(conf, dict):
         return None
-    ident = str(conf.get("identification", "")).lower() or "unknown"
-    val = str(conf.get("valuation", "")).lower() or "unknown"
+    ident = str(conf.get("id", conf.get("identification", ""))).lower() or "unknown"
+    val = str(conf.get("value", conf.get("valuation", ""))).lower() or "unknown"
     return (ident, val)
 
 
@@ -198,8 +199,8 @@ def approve(
         "dims": dims or {},
         "price_override": price_override,
         "appraisal_confidence": {
-            "identification": confidence[0] if confidence else "unknown",
-            "valuation": confidence[1] if confidence else "unknown",
+            "id": confidence[0] if confidence else "unknown",
+            "value": confidence[1] if confidence else "unknown",
         },
         "acknowledged_low_confidence": bool(acknowledge_low_confidence),
     }
