@@ -22,3 +22,6 @@ __pycache__/
 
 # --- manual backups (git replaces these) ---
 *.bak*
+
+# --- swarm local tuning (untracked, box-side only) ---
+.swarm-local.json

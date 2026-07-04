@@ -1,0 +1,31 @@
+[
+  {
+    "checkpoint": "swarm-script-deployment",
+    "question": "The live Hetzner swarm scripts (run_swarm.sh, peanut_wheel.py, triage.py in ~/swarm) are hand-managed and actively hand-tuned by Morley (persona weights, thresholds, .bak-* culture) \u2014 they are in NO git repo; the only tracked copies are snapshots in this build's kb. How should the generalized swarm-side code be deployed? Options: (a) SIDE-BY-SIDE \u2014 ship new generic files (e.g. run_swarm_generic.sh + swarm-repos/<name>.json) from this repo, rsynced by transport on each profile run; the existing NextChapter files stay untouched and hand-managed (zero regression risk, but two runner lineages to maintain and NextChapter never benefits from generic fixes); (b) ADOPT \u2014 bring the swarm scripts into this repo as the single source of truth, transport rsyncs them every run, Morley's future tuning happens via git (one lineage, real reviewability, but the FIRST sync must faithfully capture his live tuning and his box-side .bak workflow dies); (c) side-by-side now with a documented later adoption path once the generic runner has survived a few archie runs. Consider: Morley mid-flight tunes NextChapter personas during active sweeps; a clobbered tweak silently changes his running QA.",
+    "synthesis": "Deploy side-by-side now (option c) with a documented, gated adoption path. Ship new generic scripts (run_swarm_generic.sh, swarm-repos/<name>.json) from this repo via transport rsync, leaving Morley\u2019s live trio untouched. Commit to an explicit adoption timeline after the generic runner survives at least two successive Archie\u2011profile QA sweeps without regressions. This avoids immediate clobber risk while forcing a decision point before permanent fragmentation sets in.",
+    "contradictions": [
+      "Advisor 1 recommends permanent side-by-side (option a), arguing that NextChapter\u2019s live tuning is too tightly coupled to benefit from generic fixes and that manual porting of fixes is acceptable. Advisors 2 and 3 argue that side-by-side without a hard adoption gate will ossify into permanent fork, making future unification impossible. The conflict is whether permanent dual lineage is acceptable or whether a gated path is essential."
+    ],
+    "blindspots": [
+      "No plan exists for safely merging Morley\u2019s .bak-* culture and mid-sweep tweaks into git during a future adoption; without an automated drift\u2011detection script, the cutover will be a high-risk guessing game.",
+      "Treating the scripts as monoliths misses the opportunity to externalize persona weights and thresholds into a local, untracked config file, which would allow the code to be adopted today while keeping live tuning hand\u2011managed on the box."
+    ],
+    "fallback": false,
+    "manifest_gap": false,
+    "resumed_sid": "20260704_030008_293196"
+  },
+  {
+    "checkpoint": "verify-lane-shape",
+    "question": "Each repo needs: code-scope pattern (.ts/.tsx vs .py), deps step (npm ci vs none), optional dev-server/vision lane, and a verify command (tsc-baseline for NextChapter, pytest-green for archie). Where does this live? Options: (a) in profiles/<name>.json on the DO side, passed to the swarm invocation (one config source beside the existing stage2 profile fields, but the Hetzner side becomes argument-driven and DO/Hetzner configs can drift); (b) a swarm-repos/<name>.json shipped to Hetzner alongside the runner (config travels with the code that reads it, but now TWO json files describe one repo across two boxes); (c) a single self-describing file committed in each TARGET repo (e.g. .swarm.json at repo root: scope, deps, verify, routes) that run_swarm reads after checkout \u2014 config lives with the code it describes, any repo becomes swarm-able by adding one file, no cross-box drift; NextChapter needs the file added once (or falls back to today's hardcoded defaults when absent). Which shape, weighing drift risk against Morley's one-box-at-a-time debugging habits?",
+    "synthesis": "Choose option (c): commit a self-describing `.swarm.json` at the root of each target repo. This eliminates cross-box configuration drift because the config travels with the code that reads it, makes any repo swarm-able by simply adding one file, and aligns with Morley\u2019s one-box debugging habits since the config is physically present in the working tree after checkout. Fall back to today\u2019s hardcoded defaults when the file is absent to maintain backward compatibility.",
+    "contradictions": [],
+    "blindspots": [
+      "Silent fallback danger: If `.swarm.json` is missing, the system uses hidden hardcoded defaults\u2014potentially masking a missing verify step or wrong deps and producing false-green pipelines. A clear warning must be emitted on fallback.",
+      "Global change overhead: Updating a rule across all repos (e.g., a new default Node version) requires a PR to every repository instead of one central file, increasing maintenance burden.",
+      "Schema evolution risk: As the runner evolves, it must remain backward-compatible with older `.swarm.json` shapes indefinitely. Without explicit file-versioning, a breaking parser change could silently misinterpret old configs."
+    ],
+    "fallback": false,
+    "manifest_gap": false,
+    "resumed_sid": "20260704_032422_ba8693"
+  }
+]
