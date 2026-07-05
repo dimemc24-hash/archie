@@ -1,0 +1,13 @@
+{
+  "name": "newchapter",
+  "description": "NextChapter (Next.js/TypeScript). This config mirrors the LIVE hardcoded defaults in ~/swarm/run_swarm.sh so the generic runner can run NextChapter if ever needed. Default transport still uses the live runner for zero regression.",
+  "hetzner_repo_path": "swarm/newchapter",
+  "scope_pattern": "\\.(ts|tsx)$",
+  "exclude_pattern": "(\\.test\\.|/__tests__/|^_harness/|\\.d\\.ts$)",
+  "lockfile": "package-lock.json",
+  "deps_step": "npm ci --legacy-peer-deps",
+  "dev_server_cmd": "npm run dev",
+  "dev_server_health": "http://localhost:3000",
+  "verify_cmd": "npx tsc --noEmit",
+  "routes": ""
+}

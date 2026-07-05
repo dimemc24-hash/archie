@@ -2,5 +2,11 @@
   "name": "archie",
   "repo_url": "git@github-archie:dimemc24-hash/archie.git",
   "workspace": "~/harness/workspaces/archie/repo",
-  "notes": "Target checkout is deliberately SEPARATE from ~/harness itself (the driver's own checkout) even though both track dimemc24-hash/archie — Stage 2 checks out build/<id> branches into this workspace, and doing that inside ~/harness would mean the running driver script's own working tree gets mutated mid-build. Cloned automatically on first use by resolve_repo()."
+  "notes": "Target checkout is deliberately SEPARATE from ~/harness itself (the driver's own checkout) even though both track dimemc24-hash/archie — Stage 2 checks out build/<id> branches into this workspace, and doing that inside ~/harness would mean the running driver script's own working tree gets mutated mid-build. Cloned automatically on first use by resolve_repo().",
+  "swarm": {
+    "repo_name": "archie",
+    "hetzner_repo_path": "swarm/archie",
+    "runner": "generic",
+    "bootstrap": true
+  }
 }

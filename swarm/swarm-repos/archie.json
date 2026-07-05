@@ -1,0 +1,13 @@
+{
+  "name": "archie",
+  "description": "dimemc24-hash/archie — the harness driver repo (Python/stdlib). Swarm scopes to changed .py files; no dev server, no vision lane; verify via pytest on antiques/test_antiques.py.",
+  "hetzner_repo_path": "swarm/archie",
+  "scope_pattern": "\\.(py)$",
+  "exclude_pattern": "(__pycache__/|\\.pyc$|/test_)",
+  "lockfile": "",
+  "deps_step": "none",
+  "dev_server_cmd": "",
+  "dev_server_health": "",
+  "verify_cmd": "python3 -m pytest antiques/test_antiques.py -q",
+  "routes": ""
+}
