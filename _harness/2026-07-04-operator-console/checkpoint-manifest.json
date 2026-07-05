@@ -1,0 +1,18 @@
+{
+  "checkpoints": [
+    {
+      "id": "publish-confirm-boundary",
+      "trigger": "before implementing the publish endpoints and their UI",
+      "question": "Publishing to eBay is the pipeline's most outward-facing action (a real listing on a real marketplace once production flips). The UI now gains publish controls. Options for v1: (a) full two-step in the UI \u2014 prepare (dry-run payload shown) then a separate confirm click calls publish apply; fastest daily flow, marker re-validation still applies server-side, but a listing goes live from two clicks in a browser tab; (b) UI prepare-only \u2014 the UI shows the exact payload and a copy-able CLI apply command, actual apply stays terminal-only for one more cycle (zero new blast radius, but keeps the CLI dependency the console exists to remove); (c) two-step in UI plus a cooling gate \u2014 confirm button disabled for N seconds while the payload is displayed, and the confirm records payload-digest so a changed row voids it (mirrors the run_stage4/approve marker two-step semantics in UI form). Morley runs this solo behind Tailscale; sandbox now, production later. Which boundary for v1?",
+      "on_synthesis": "implement exactly the chosen boundary in plugin_api.py and the UI, preserving server-side marker re-validation regardless, with tests for the gate behavior",
+      "panel_override": "budget"
+    },
+    {
+      "id": "low-confidence-ux",
+      "trigger": "before implementing the approve form's acknowledgment control",
+      "question": "CLI approve of a non-high/high-confidence listing requires --ack-low-confidence (council decision, audit-recorded). In the UI, what is the equivalent conscious step? Options: (a) a checkbox 'I acknowledge the appraisal confidence is not high' that arms the Approve button \u2014 one click, low friction, but checkbox-blindness is real; (b) the confidence block expands and the operator must type a short reason ('why approving anyway') that is stored alongside acknowledged_low_confidence in the approval jsonb \u2014 a real audit artifact, slightly slower; (c) tiered \u2014 checkbox for medium/low, typed reason required only for unknown or authenticity-flagged items. The point of the gate is preventing ACCIDENTAL approval of uncertain appraisals ('I'd rather I-don't-know than wrong'), not adding ceremony to deliberate ones. Which UX?",
+      "on_synthesis": "implement exactly the chosen control in the UI and pass its artifacts through the approve endpoint into the approval jsonb, with tests covering each confidence tier's path",
+      "panel_override": "budget"
+    }
+  ]
+}
