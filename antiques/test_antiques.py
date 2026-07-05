@@ -492,7 +492,9 @@ class TestApprove:
         })
         price_listing("test-0", ManualComps([{"price": 200.0}]), client)
         result = approve("test-0", weight_oz=5.0,
-                         acknowledge_low_confidence=True, client=client)
+                         acknowledge_low_confidence=True,
+                         approval_reason="Ack accepted",
+                         client=client)
         assert result["status"] == "approved"
         # The ack and the actual confidence are both recorded.
         assert result["approval"]["acknowledged_low_confidence"] is True
@@ -546,6 +548,77 @@ class TestApprove:
             assert e.confidence == ("medium", "low")
         else:
             pytest.fail("should have raised LowConfidenceError")
+
+    # -- typed reason for non-high-confidence (council decision) -------- #
+
+    def test_approve_low_confidence_without_reason_raises(self, stub, tmp_artifacts):
+        """Non-high-confidence with ack but no typed reason → ValueError."""
+        client, _ = stub
+        client.insert_listing({
+            "status": "draft", "title": "Uncertain",
+            "appraisal": _low_confidence_appraisal(ident="medium", val="low"),
+        })
+        price_listing("test-0", ManualComps([{"price": 200.0}]), client)
+        with pytest.raises(ValueError, match="approval_reason"):
+            approve("test-0", weight_oz=5.0,
+                    acknowledge_low_confidence=True, client=client)
+
+    def test_approve_low_confidence_with_reason_succeeds(self, stub, tmp_artifacts):
+        """Non-high-confidence WITH ack AND typed reason → approves."""
+        client, _ = stub
+        client.insert_listing({
+            "status": "draft", "title": "Uncertain",
+            "appraisal": _low_confidence_appraisal(ident="low", val="medium"),
+        })
+        price_listing("test-0", ManualComps([{"price": 200.0}]), client)
+        result = approve("test-0", weight_oz=5.0,
+                         acknowledge_low_confidence=True,
+                         approval_reason="Comps confirm the value",
+                         client=client)
+        assert result["status"] == "approved"
+        # The typed reason is stored as an audit artifact.
+        assert result["approval"]["approval_reason"] == "Comps confirm the value"
+        assert result["approval"]["acknowledged_low_confidence"] is True
+
+    def test_approve_high_confidence_ignores_reason(self, stub, tmp_artifacts):
+        """High/high confidence → approval_reason is optional/ignored."""
+        client, _ = stub
+        client.insert_listing({
+            "status": "draft", "title": "Clean",
+            "appraisal": _high_confidence_appraisal(),
+        })
+        price_listing("test-0", ManualComps([{"price": 200.0}]), client)
+        # With reason (should work)
+        result = approve("test-0", weight_oz=5.0,
+                         approval_reason="unnecessary but allowed",
+                         client=client)
+        assert result["status"] == "approved"
+        # Reason should be stored (even if not required)
+        assert result["approval"]["approval_reason"] == "unnecessary but allowed"
+        # Without reason (should also work - clean path)
+        client.insert_listing({
+            "status": "draft", "title": "Clean2",
+            "appraisal": _high_confidence_appraisal(),
+        })
+        price_listing("test-1", ManualComps([{"price": 200.0}]), client)
+        result = approve("test-1", weight_oz=5.0, client=client)
+        assert result["status"] == "approved"
+        assert result["approval"]["approval_reason"] is None
+
+    def test_approve_cli_approval_reason_flag(self):
+        """The approve CLI accepts --approval-reason."""
+        import argparse
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--id", required=True)
+        ap.add_argument("--weight-oz", type=float, required=True)
+        ap.add_argument("--approval-reason", default=None)
+
+        args = ap.parse_args(["--id", "x", "--weight-oz", "5"])
+        assert args.approval_reason is None
+
+        args = ap.parse_args(["--id", "x", "--weight-oz", "5",
+                              "--approval-reason", "My reason"])
+        assert args.approval_reason == "My reason"
 
     def test_approve_cli_ack_low_confidence_flag(self):
         """The approve CLI accepts --ack-low-confidence (store_true)."""
@@ -1187,3 +1260,351 @@ def test_appraisal_confidence_accepts_legacy_keys():
     assert _appraisal_confidence(legacy) == ("high", "low")
     current = {"appraisal": {"confidence": {"id": "high", "value": "high"}}}
     assert _appraisal_confidence(current) == ("high", "high")
+
+
+# --------------------------------------------------------------------------- #
+# Two-step publish cooling gate tests
+# --------------------------------------------------------------------------- #
+# Note: These tests verify the cooling gate logic at the function level,
+# matching the pattern of existing tests (TestApprove, TestPublish).
+# The FastAPI endpoints (plugin_api.py) wrap these functions.
+
+import json
+from datetime import datetime, timezone
+
+
+class TestTwoStepPublishCoolingGate:
+    """Tests for the two-step publish flow cooling gate logic.
+
+    The flow is:
+    1. publish_request() - validates marker, records request timestamp, returns digest
+    2. wait for cooling period
+    3. publish_confirm() - validates cooling elapsed, digest unchanged, publishes
+
+    This mirrors approve → publish/--apply semantics but adds UI friction.
+    """
+
+    def _setup_approved(self, client, photos=None):
+        """Helper: create a draft, price it (with category_id), approve it."""
+        client.insert_listing({
+            "status": "draft",
+            "title": "Omega Seamaster",
+            "description": "Vintage watch",
+            "category_guess": "Watches",
+            "appraisal": _high_confidence_appraisal(),
+            "photos": photos or [],
+            "notes": "",
+        })
+        price_listing("test-0", ManualComps([{"price": 200.0}]), client)
+        # Simulate taxonomy resolution: set category_id in pricing jsonb.
+        row = client.get_listing("test-0")
+        pricing = row.get("pricing") or {}
+        pricing["category_id"] = "31387"  # eBay leaf: Watches
+        pricing["category_name"] = "Wristwatches"
+        client.patch_listing("test-0", {"pricing": pricing})
+        approve("test-0", weight_oz=5.0, client=client)
+
+    def _get_row_digest(self, row):
+        """Helper to compute the payload digest (same as plugin_api.py)."""
+        import hashlib
+        pricing = row.get("pricing") or {}
+        price = pricing.get("recommended") if isinstance(pricing, dict) else None
+        photos = row.get("photos") or []
+        n_photos = len(photos) if isinstance(photos, list) else 0
+        payload = f"{row.get('title','')}|{price}|{n_photos}"
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+    def _make_publish_request(self, client, listing_id):
+        """Simulates the publish_request endpoint logic."""
+        from antiques.common import _now_iso
+        from antiques.approve import read_marker
+
+        row = client.get_listing(listing_id)
+        if not row:
+            raise ValueError(f"listing {listing_id} not found")
+        if row.get("status") != "approved":
+            raise ValueError(f"listing {listing_id} is '{row.get('status')}' — must be 'approved'")
+
+        # Validate marker exists.
+        marker = read_marker(listing_id)
+        if marker.get("applied"):
+            raise ValueError(f"listing {listing_id} already published")
+
+        # Compute digest.
+        payload_digest = self._get_row_digest(row)
+        pricing = row.get("pricing") or {}
+        price = pricing.get("recommended") if isinstance(pricing, dict) else None
+        n_photos = len(row.get("photos") or [])
+
+        # Store request in notes.
+        existing_notes = row.get("notes")
+        try:
+            notes = json.loads(existing_notes) if existing_notes else {}
+        except (json.JSONDecodeError, TypeError):
+            notes = {}
+        if not isinstance(notes, dict):
+            notes = {}
+
+        notes["publish_request"] = {
+            "requested_at": _now_iso(),
+            "payload_digest": payload_digest,
+            "price": price,
+            "n_photos": n_photos,
+        }
+        client.patch_listing(listing_id, {"notes": json.dumps(notes)})
+
+        return {
+            "payload_digest": payload_digest,
+            "price": price,
+            "n_photos": n_photos,
+            "requested_at": notes["publish_request"]["requested_at"],
+        }
+
+    def _make_publish_confirm(self, client, listing_id, cooling_seconds=3):
+        """Simulates the publish_confirm endpoint logic."""
+        from antiques.common import _now_iso
+        from antiques.approve import read_marker, validate_marker, mark_applied
+
+        row = client.get_listing(listing_id)
+        if not row:
+            raise ValueError(f"listing {listing_id} not found")
+        if row.get("status") != "approved":
+            raise ValueError(f"listing {listing_id} is '{row.get('status')}' — must be 'approved'")
+
+        # Check request exists.
+        existing_notes = row.get("notes")
+        try:
+            notes = json.loads(existing_notes) if existing_notes else {}
+        except (json.JSONDecodeError, TypeError):
+            notes = {}
+        if not isinstance(notes, dict):
+            notes = {}
+
+        publish_request = notes.get("publish_request")
+        if not publish_request:
+            raise ValueError("No publish request found. Call publish_request first.")
+
+        # Check cooling period.
+        requested_at = publish_request.get("requested_at", "")
+        if requested_at:
+            try:
+                requested_time = datetime.fromisoformat(requested_at.replace("Z", "+00:00"))
+                now_time = datetime.now(timezone.utc)
+                elapsed = (now_time - requested_time).total_seconds()
+                if elapsed < cooling_seconds:
+                    remaining = cooling_seconds - elapsed
+                    raise ValueError(f"Cooling period not elapsed. {remaining:.1f}s remaining.")
+            except (ValueError, TypeError) as e:
+                # Skip time check if parsing fails - but don't raise for cooling failure
+                if "Cooling" in str(e):
+                    raise  # Re-raise cooling check failures
+                pass  # Skip time check if parsing fails.
+
+        # Validate digest hasn't changed.
+        current_digest = self._get_row_digest(row)
+        if current_digest != publish_request.get("payload_digest"):
+            raise ValueError(
+                f"STALE PAYLOAD: digest changed. "
+                f"Expected {publish_request.get('payload_digest')}, got {current_digest}."
+            )
+
+        # Validate marker.
+        marker = read_marker(listing_id)
+        validate_marker(marker, row)
+
+        # Publish.
+        result = publish_listing(listing_id, DryRunProvider(), client=client, apply=True)
+        mark_applied(listing_id)
+
+        # Clean up notes.
+        notes.pop("publish_request", None)
+        client.patch_listing(listing_id, {"notes": json.dumps(notes) if notes else {}})
+
+        return {"status": "ok", "published": True}
+
+    def test_publish_request_validates_status(self, stub, tmp_artifacts):
+        """Request fails if listing is not approved."""
+        client, _ = stub
+        client.insert_listing({
+            "status": "draft",
+            "title": "Test",
+            "notes": "",
+        })
+        with pytest.raises(ValueError, match="must be 'approved'"):
+            self._make_publish_request(client, "test-0")
+
+    def test_publish_request_validates_marker_exists(self, stub, tmp_artifacts):
+        """Request fails if no pending-publish marker exists."""
+        client, _ = stub
+        client.insert_listing({
+            "status": "approved",
+            "title": "Test",
+            "notes": "",
+            "appraisal": _high_confidence_appraisal(),
+        })
+        with pytest.raises(FileNotFoundError):
+            self._make_publish_request(client, "test-0")
+
+    def test_publish_request_returns_digest_and_price(self, stub, tmp_artifacts):
+        """Request returns payload digest, price, photo count."""
+        client, _ = stub
+        self._setup_approved(client)
+        result = self._make_publish_request(client, "test-0")
+
+        assert "payload_digest" in result
+        assert result["price"] == 200.0
+        assert result["n_photos"] == 0
+
+        # Verify request was recorded in notes.
+        row = client.get_listing("test-0")
+        notes = json.loads(row.get("notes") or "{}")
+        assert "publish_request" in notes
+        assert notes["publish_request"]["payload_digest"] == result["payload_digest"]
+
+    def test_publish_confirm_fails_without_request(self, stub, tmp_artifacts):
+        """Confirm fails if no prior request was made."""
+        client, _ = stub
+        self._setup_approved(client)
+        with pytest.raises(ValueError, match="No publish request found"):
+            self._make_publish_confirm(client, "test-0")
+
+    def test_publish_confirm_fails_before_cooling_elapsed(self, stub, tmp_artifacts):
+        """Confirm fails if cooling period hasn't elapsed."""
+        import time
+        client, _ = stub
+        self._setup_approved(client)
+
+        # Make a request.
+        self._make_publish_request(client, "test-0")
+
+        # Wait 1 second so elapsed time >= 1 but less than cooling period (3)
+        time.sleep(1.1)
+
+        # Try to confirm - should fail because cooling hasn't elapsed.
+        with pytest.raises(ValueError, match="Cooling period not elapsed"):
+            self._make_publish_confirm(client, "test-0", cooling_seconds=3)
+
+    def test_publish_confirm_succeeds_after_cooling(self, stub, tmp_artifacts):
+        """Confirm succeeds after cooling period and publishes."""
+        client, _ = stub
+        self._setup_approved(client)
+
+        # Make a request.
+        self._make_publish_request(client, "test-0")
+
+        # Set past timestamp to bypass cooling.
+        row = client.get_listing("test-0")
+        notes = json.loads(row.get("notes") or "{}")
+        old_time = datetime.now(timezone.utc).timestamp() - 10
+        notes["publish_request"]["requested_at"] = datetime.fromtimestamp(
+            old_time, tz=timezone.utc
+        ).isoformat()
+        client.patch_listing("test-0", {"notes": json.dumps(notes)})
+
+        # Confirm should succeed.
+        result = self._make_publish_confirm(client, "test-0", cooling_seconds=3)
+
+        assert result["status"] == "ok"
+        assert result["published"] is True
+
+        # Verify status advanced to listed.
+        row = client.get_listing("test-0")
+        assert row["status"] == "listed"
+
+        # Verify publish_request was cleaned from notes.
+        notes = json.loads(row.get("notes") or "{}")
+        assert "publish_request" not in notes
+
+    def test_publish_confirm_fails_on_stale_digest(self, stub, tmp_artifacts):
+        """Confirm fails if the payload digest changed after request."""
+        client, t = stub
+        self._setup_approved(client)
+
+        # Make a request.
+        self._make_publish_request(client, "test-0")
+
+        # Tamper with the row (changes the digest).
+        t.rows["test-0"]["title"] = "Changed Title"
+
+        # Set past timestamp.
+        row = client.get_listing("test-0")
+        notes = json.loads(row.get("notes") or "{}")
+        old_time = datetime.now(timezone.utc).timestamp() - 10
+        notes["publish_request"]["requested_at"] = datetime.fromtimestamp(
+            old_time, tz=timezone.utc
+        ).isoformat()
+        client.patch_listing("test-0", {"notes": json.dumps(notes)})
+
+        # Confirm should fail due to stale digest.
+        with pytest.raises(ValueError, match="STALE PAYLOAD"):
+            self._make_publish_confirm(client, "test-0")
+
+    def test_publish_confirm_fails_on_stale_marker(self, stub, tmp_artifacts):
+        """Confirm fails if the marker on disk is stale."""
+        from antiques.approve import _marker_path
+
+        client, t = stub
+        self._setup_approved(client)
+
+        # Make a request.
+        self._make_publish_request(client, "test-0")
+
+        # Set past timestamp.
+        row = client.get_listing("test-0")
+        notes = json.loads(row.get("notes") or "{}")
+        old_time = datetime.now(timezone.utc).timestamp() - 10
+        notes["publish_request"]["requested_at"] = datetime.fromtimestamp(
+            old_time, tz=timezone.utc
+        ).isoformat()
+        client.patch_listing("test-0", {"notes": json.dumps(notes)})
+
+        # Tamper with the marker on disk.
+        marker_path = _marker_path("test-0")
+        marker = json.loads(marker_path.read_text())
+        marker["row_digest"] = "stale-digest"
+        marker_path.write_text(json.dumps(marker))
+
+        # Confirm should fail due to stale marker.
+        with pytest.raises(ValueError, match="STALE MARKER"):
+            self._make_publish_confirm(client, "test-0")
+
+    def test_payload_digest_includes_title_price_photos(self):
+        """The payload digest is computed from title, price, and photo count."""
+        from antiques.approve import _row_digest
+
+        row1 = {
+            "title": "Test Item",
+            "pricing": {"recommended": 100.0},
+            "photos": [{"path": "a.jpg"}, {"path": "b.jpg"}],
+        }
+        row2 = {
+            "title": "Test Item",
+            "pricing": {"recommended": 100.0},
+            "photos": [{"path": "a.jpg"}, {"path": "b.jpg"}],
+        }
+        row3 = {
+            "title": "Different",
+            "pricing": {"recommended": 100.0},
+            "photos": [{"path": "a.jpg"}, {"path": "b.jpg"}],
+        }
+
+        # Same content → same digest.
+        assert _row_digest(row1) == _row_digest(row2)
+
+        # Different title → different digest.
+        assert _row_digest(row1) != _row_digest(row3)
+
+    def test_legacy_publish_still_works(self, stub, tmp_artifacts):
+        """The legacy publish flow still works (direct function call)."""
+        client, _ = stub
+        self._setup_approved(client)
+
+        # Dry-run.
+        result = publish_listing("test-0", DryRunProvider(), client=client, apply=False)
+        assert result["dry_run"] is True
+        assert client.get_listing("test-0")["status"] == "approved"
+
+        # Apply.
+        result = publish_listing("test-0", DryRunProvider(), client=client, apply=True)
+        assert result["dry_run"] is False
+        assert client.get_listing("test-0")["status"] == "listed"

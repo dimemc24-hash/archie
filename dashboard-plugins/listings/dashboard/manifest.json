@@ -1,9 +1,9 @@
 {
   "name": "listings",
   "label": "Listings",
-  "description": "Antiques listing pipeline: queue view grouped by status with counts, listing detail with fields and signed photo URLs. Read-only.",
+  "description": "Antiques listing pipeline: queue view grouped by status, listing detail with fields and signed photo URLs, and write operations (price, approve, reject, publish).",
   "icon": "Package",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "tab": {
     "path": "/listings",
     "position": "after:harness-run"

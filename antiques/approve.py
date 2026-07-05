@@ -139,6 +139,7 @@ def approve(
     price_override: float | None = None,
     approved_by: str = "morley",
     acknowledge_low_confidence: bool = False,
+    approval_reason: str | None = None,
     client: SupabaseClient | None = None,
 ) -> dict[str, Any]:
     """Approve a listing for publication.
@@ -152,6 +153,9 @@ def approve(
     ``LowConfidenceError`` unless ``acknowledge_low_confidence=True``. This
     forces a conscious step on 'honestly unknown' items — clean high/high
     items are unaffected.
+
+    When approving a non-high-confidence appraisal, ``approval_reason`` is
+    required and stored in the approval jsonb as an audit artifact.
     """
     client = client or SupabaseClient()
     row = client.get_listing(row_id)
@@ -173,13 +177,19 @@ def approve(
 
     # Confidence guard (council decision: appraisal-confidence).
     confidence = _appraisal_confidence(row)
+    effective = confidence or ("unknown", "unknown")
     if not _is_high_confidence(confidence):
         if not acknowledge_low_confidence:
             # Use the effective confidence for the message — None means 'no
             # appraisal / no confidence recorded', surfaced as ('unknown',
             # 'unknown').
-            effective = confidence or ("unknown", "unknown")
             raise LowConfidenceError(row_id, effective)
+        # For non-high-confidence approvals, require a typed reason (audit artifact).
+        if not approval_reason or not approval_reason.strip():
+            raise ValueError(
+                f"listing {row_id} has non-high confidence {effective}. "
+                f"A typed approval_reason is required to approve deliberately."
+            )
 
     # If price_override given, patch pricing before advancing.
     patch: dict[str, Any] = {}
@@ -203,6 +213,7 @@ def approve(
             "value": confidence[1] if confidence else "unknown",
         },
         "acknowledged_low_confidence": bool(acknowledge_low_confidence),
+        "approval_reason": approval_reason if approval_reason and approval_reason.strip() else None,
     }
     patch["approval"] = approval
 
@@ -340,6 +351,9 @@ def main() -> int:
                     help="acknowledge low appraisal confidence and approve "
                          "deliberately (required when confidence is not "
                          "high/high)")
+    ap.add_argument("--approval-reason", default=None,
+                    help="typed reason when approving non-high-confidence "
+                         "appraisal (stored in approval jsonb)")
     ap.add_argument("--reject", default=None,
                     help="reject the listing with the given reason")
     args = ap.parse_args()
@@ -363,6 +377,7 @@ def main() -> int:
             price_override=args.price_override,
             approved_by=args.approved_by,
             acknowledge_low_confidence=args.ack_low_confidence,
+            approval_reason=args.approval_reason,
             client=client,
         )
         print(json.dumps(result, indent=2, default=str))
