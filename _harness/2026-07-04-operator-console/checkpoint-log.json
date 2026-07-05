@@ -1,0 +1,33 @@
+[
+  {
+    "checkpoint": "publish-confirm-boundary",
+    "question": "Publishing to eBay is the pipeline's most outward-facing action (a real listing on a real marketplace once production flips). The UI now gains publish controls. Options for v1: (a) full two-step in the UI \u2014 prepare (dry-run payload shown) then a separate confirm click calls publish apply; fastest daily flow, marker re-validation still applies server-side, but a listing goes live from two clicks in a browser tab; (b) UI prepare-only \u2014 the UI shows the exact payload and a copy-able CLI apply command, actual apply stays terminal-only for one more cycle (zero new blast radius, but keeps the CLI dependency the console exists to remove); (c) two-step in UI plus a cooling gate \u2014 confirm button disabled for N seconds while the payload is displayed, and the confirm records payload-digest so a changed row voids it (mirrors the run_stage4/approve marker two-step semantics in UI form). Morley runs this solo behind Tailscale; sandbox now, production later. Which boundary for v1?",
+    "synthesis": "Implement option (c): two-step in the UI with a cooling gate and payload\u2011digest. This mirrors the existing run_stage4/approve marker semantics, adds a deliberate pause before a live listing, and fully removes the CLI dependency. The extra friction is acceptable for a solo operator in sandbox and reduces accidental\u2011publish risk; server\u2011side re\u2011validation still guards correctness. The UI complexity is justified for the pipeline\u2019s most outward\u2011facing action.",
+    "contradictions": [
+      "Advisors 1 and 2 advocate for the cooling gate and digest as necessary safety measures; Advisor 3 argues they are over\u2011engineering for a solo sandbox operator when server\u2011side validation already exists. The tension is between immediate velocity and deliberate safety."
+    ],
+    "blindspots": [
+      "The UI does not yet present clear error feedback when a publish fails (e.g., digest mismatch, eBay\u2011side drift), which could lead to blind retries that negate the cooling gate.",
+      "The design does not distinguish between sandbox and production environments; the same friction will apply to production later, where a toggle or graduated friction might be preferable.",
+      "The cooling gate may become ritualized muscle memory, offering false confidence without actually preventing a tired double\u2011click."
+    ],
+    "fallback": false,
+    "manifest_gap": false,
+    "resumed_sid": "20260705_060146_396c86"
+  },
+  {
+    "checkpoint": "low-confidence-ux",
+    "question": "CLI approve of a non-high/high-confidence listing requires --ack-low-confidence (council decision, audit-recorded). In the UI, what is the equivalent conscious step? Options: (a) a checkbox 'I acknowledge the appraisal confidence is not high' that arms the Approve button \u2014 one click, low friction, but checkbox-blindness is real; (b) the confidence block expands and the operator must type a short reason ('why approving anyway') that is stored alongside acknowledged_low_confidence in the approval jsonb \u2014 a real audit artifact, slightly slower; (c) tiered \u2014 checkbox for medium/low, typed reason required only for unknown or authenticity-flagged items. The point of the gate is preventing ACCIDENTAL approval of uncertain appraisals ('I'd rather I-don't-know than wrong'), not adding ceremony to deliberate ones. Which UX?",
+    "synthesis": "Use option (b): when a non-high/high-confidence appraisal is about to be approved, the confidence block expands in-line and the operator must type a short reason before the Approve button becomes active. The reason is stored in the approval jsonb alongside acknowledged_low_confidence. This mirrors the deliberate CLI flag, forces a conscious step that prevents accidental approval, and creates an audit artifact. A checkbox alone (a) is ineffective due to checkbox-blindness; a tiered scheme (c) adds complexity without commensurate benefit.",
+    "contradictions": [
+      "Implementation flow: Advisor 1 proposes a conditional reveal triggered by a 409 response (two-step), while Advisors 2 and 3 advocate an immediate in-page expansion when the confidence level is known. The final design can adopt either pattern as long as the typed reason requirement is met."
+    ],
+    "blindspots": [
+      "Operators may maintain a set of canned copy-paste reasons (e.g., 'ok', 'standard') to bypass the cognitive gate without genuine engagement, undermining audit quality.",
+      "If the appraisal confidence algorithm generates too many false positives (flagging high-quality listings as low confidence), operator fatigue will set in, and the typed reason will degrade into boilerplate regardless of the UX pattern chosen."
+    ],
+    "fallback": false,
+    "manifest_gap": false,
+    "resumed_sid": "20260705_061212_170c15"
+  }
+]
