@@ -135,6 +135,23 @@ async def get_listing(listing_id: str) -> dict:
     return row
 
 
+_CONF_LEVELS = {"high", "medium", "low", "unknown"}
+
+
+def _confidence_summary(row: dict) -> dict:
+    """Normalized appraisal confidence for the queue badge (missing -> unknown)."""
+    appraisal = row.get("appraisal")
+    conf = appraisal.get("confidence") if isinstance(appraisal, dict) else None
+    if not isinstance(conf, dict):
+        conf = {}
+    ident = str(conf.get("id", conf.get("identification", "unknown"))).lower()
+    val = str(conf.get("value", conf.get("valuation", "unknown"))).lower()
+    return {
+        "id": ident if ident in _CONF_LEVELS else "unknown",
+        "value": val if val in _CONF_LEVELS else "unknown",
+    }
+
+
 def _summarize(row: dict) -> dict:
     """Compact summary for the queue view."""
     pricing = row.get("pricing") or {}
@@ -144,6 +161,7 @@ def _summarize(row: dict) -> dict:
         "category_guess": row.get("category_guess"),
         "price": pricing.get("recommended") if isinstance(pricing, dict) else None,
         "n_photos": len(row.get("photos") or []),
+        "confidence": _confidence_summary(row),
         "created_at": row.get("created_at", ""),
         "updated_at": row.get("updated_at", ""),
     }

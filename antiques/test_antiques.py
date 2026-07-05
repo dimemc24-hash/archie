@@ -48,6 +48,7 @@ from antiques.approve import (  # noqa: E402
     read_marker,
     validate_marker,
     mark_applied,
+    LowConfidenceError,
 )
 from antiques.publish import (  # noqa: E402
     DryRunProvider,
@@ -156,6 +157,27 @@ def _set_category_id(client, row_id="test-0", cat_id="31387", cat_name="Wristwat
     pricing["category_id"] = cat_id
     pricing["category_name"] = cat_name
     client.patch_listing(row_id, {"pricing": pricing})
+
+
+def _high_confidence_appraisal(era="1968", brand="Omega", condition="excellent"):
+    """Helper: build an appraisal jsonb with high/high confidence (clean path)."""
+    return {
+        "era": era,
+        "brand": brand,
+        "condition": condition,
+        "confidence": {"id": "high", "value": "high"},
+    }
+
+
+def _low_confidence_appraisal(era="1968", brand="Omega", condition="excellent",
+                              ident="medium", val="low"):
+    """Helper: build an appraisal jsonb with non-high confidence (flagged path)."""
+    return {
+        "era": era,
+        "brand": brand,
+        "condition": condition,
+        "confidence": {"id": ident, "value": val},
+    }
 
 
 @pytest.fixture
@@ -396,16 +418,27 @@ class TestApprove:
 
     def test_approve_priced_listing(self, stub, tmp_artifacts):
         client, _ = stub
-        client.insert_listing({"status": "draft", "title": "Omega"})
+        client.insert_listing({
+            "status": "draft", "title": "Omega",
+            "appraisal": _high_confidence_appraisal(),
+        })
         price_listing("test-0", ManualComps([{"price": 200.0}]), client)
 
         result = approve("test-0", weight_oz=5.0, dims={"l": 6, "w": 4, "h": 2}, client=client)
         assert result["status"] == "approved"
         assert result["approval"]["weight_oz"] == 5.0
+        # Confidence is recorded in the approval jsonb.
+        assert result["approval"]["appraisal_confidence"] == {
+            "id": "high", "value": "high",
+        }
+        assert result["approval"]["acknowledged_low_confidence"] is False
 
     def test_approve_writes_marker(self, stub, tmp_artifacts):
         client, _ = stub
-        client.insert_listing({"status": "draft", "title": "Omega"})
+        client.insert_listing({
+            "status": "draft", "title": "Omega",
+            "appraisal": _high_confidence_appraisal(),
+        })
         price_listing("test-0", ManualComps([{"price": 200.0}]), client)
         approve("test-0", weight_oz=5.0, client=client)
 
@@ -418,16 +451,119 @@ class TestApprove:
 
     def test_approve_draft_with_price_override(self, stub, tmp_artifacts):
         client, _ = stub
-        client.insert_listing({"status": "draft", "title": "Manual"})
+        client.insert_listing({
+            "status": "draft", "title": "Manual",
+            "appraisal": _high_confidence_appraisal(),
+        })
         result = approve("test-0", weight_oz=3.0, price_override=99.0, client=client)
         assert result["status"] == "approved"
         assert result["pricing"]["recommended"] == 99.0
 
     def test_approve_wrong_status_raises(self, stub, tmp_artifacts):
         client, _ = stub
-        client.insert_listing({"status": "draft", "title": "Test"})
+        client.insert_listing({
+            "status": "draft", "title": "Test",
+            "appraisal": _high_confidence_appraisal(),
+        })
         with pytest.raises(ValueError, match="must be 'priced'"):
             approve("test-0", weight_oz=5.0, client=client)
+
+    # -- confidence guard (council decision: appraisal-confidence) -------- #
+
+    def test_approve_low_confidence_raises(self, stub, tmp_artifacts):
+        """Low confidence appraisal without ack → LowConfidenceError."""
+        client, _ = stub
+        client.insert_listing({
+            "status": "draft", "title": "Uncertain",
+            "appraisal": _low_confidence_appraisal(ident="medium", val="low"),
+        })
+        price_listing("test-0", ManualComps([{"price": 200.0}]), client)
+        with pytest.raises(LowConfidenceError, match="not high/high"):
+            approve("test-0", weight_oz=5.0, client=client)
+        # Status should NOT have advanced.
+        assert client.get_listing("test-0")["status"] == "priced"
+
+    def test_approve_low_confidence_with_ack_succeeds(self, stub, tmp_artifacts):
+        """Low confidence appraisal WITH ack → approves and records the ack."""
+        client, _ = stub
+        client.insert_listing({
+            "status": "draft", "title": "Uncertain",
+            "appraisal": _low_confidence_appraisal(ident="low", val="medium"),
+        })
+        price_listing("test-0", ManualComps([{"price": 200.0}]), client)
+        result = approve("test-0", weight_oz=5.0,
+                         acknowledge_low_confidence=True, client=client)
+        assert result["status"] == "approved"
+        # The ack and the actual confidence are both recorded.
+        assert result["approval"]["acknowledged_low_confidence"] is True
+        assert result["approval"]["appraisal_confidence"] == {
+            "id": "low", "value": "medium",
+        }
+
+    def test_approve_no_appraisal_raises(self, stub, tmp_artifacts):
+        """No appraisal at all → treated as unknown confidence → raises."""
+        client, _ = stub
+        client.insert_listing({"status": "draft", "title": "Bare"})
+        price_listing("test-0", ManualComps([{"price": 100.0}]), client)
+        with pytest.raises(LowConfidenceError, match="unknown"):
+            approve("test-0", weight_oz=5.0, client=client)
+
+    def test_approve_no_confidence_field_raises(self, stub, tmp_artifacts):
+        """Appraisal present but no confidence structure → raises."""
+        client, _ = stub
+        client.insert_listing({
+            "status": "draft", "title": "Old-style",
+            "appraisal": {"era": "1968", "brand": "Omega", "condition": "excellent"},
+        })
+        price_listing("test-0", ManualComps([{"price": 200.0}]), client)
+        with pytest.raises(LowConfidenceError, match="unknown"):
+            approve("test-0", weight_oz=5.0, client=client)
+
+    def test_approve_high_confidence_clean_path(self, stub, tmp_artifacts):
+        """High/high confidence with no ack → approves normally (clean path)."""
+        client, _ = stub
+        client.insert_listing({
+            "status": "draft", "title": "Clean",
+            "appraisal": _high_confidence_appraisal(),
+        })
+        price_listing("test-0", ManualComps([{"price": 200.0}]), client)
+        result = approve("test-0", weight_oz=5.0, client=client)
+        assert result["status"] == "approved"
+        assert result["approval"]["acknowledged_low_confidence"] is False
+
+    def test_low_confidence_error_carries_details(self, stub, tmp_artifacts):
+        """LowConfidenceError carries the listing id and confidence tuple."""
+        client, _ = stub
+        client.insert_listing({
+            "status": "draft", "title": "Uncertain",
+            "appraisal": _low_confidence_appraisal(ident="medium", val="low"),
+        })
+        price_listing("test-0", ManualComps([{"price": 200.0}]), client)
+        try:
+            approve("test-0", weight_oz=5.0, client=client)
+        except LowConfidenceError as e:
+            assert e.listing_id == "test-0"
+            assert e.confidence == ("medium", "low")
+        else:
+            pytest.fail("should have raised LowConfidenceError")
+
+    def test_approve_cli_ack_low_confidence_flag(self):
+        """The approve CLI accepts --ack-low-confidence (store_true)."""
+        import argparse
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--id", required=True)
+        ap.add_argument("--weight-oz", type=float, required=True)
+        ap.add_argument("--price-override", type=float, default=None)
+        ap.add_argument("--ack-low-confidence", action="store_true")
+
+        # Without the flag → False (would raise LowConfidenceError).
+        args = ap.parse_args(["--id", "x", "--weight-oz", "5"])
+        assert args.ack_low_confidence is False
+
+        # With the flag → True (deliberate ack).
+        args = ap.parse_args(["--id", "x", "--weight-oz", "5",
+                              "--ack-low-confidence"])
+        assert args.ack_low_confidence is True
 
     def test_reject_from_draft(self, stub):
         client, _ = stub
@@ -466,7 +602,7 @@ class TestPublish:
             "title": "Omega Seamaster",
             "description": "Vintage watch",
             "category_guess": "Watches",
-            "appraisal": {"era": "1968", "brand": "Omega", "condition": "excellent"},
+            "appraisal": _high_confidence_appraisal(),
             "photos": photos or [],
         })
         price_listing("test-0", ManualComps([{"price": 200.0}]), client)
@@ -590,7 +726,7 @@ class TestEbaySeamFixes:
             "title": "Candlestick",
             "description": "Brass candlestick, Victorian",
             "category_guess": "candlestick",
-            "appraisal": {"era": "1890", "brand": "", "condition": "excellent"},
+            "appraisal": _high_confidence_appraisal(era="1890", brand=""),
             "photos": photos,
         })
         price_listing("test-0", ManualComps([{"price": 45.0}]), client)
@@ -840,6 +976,7 @@ class TestEbaySeamFixes:
         # Price WITHOUT a taxonomy resolver → no category_id in pricing.
         client.insert_listing({
             "status": "draft", "title": "Thing", "category_guess": "stuff",
+            "appraisal": _high_confidence_appraisal(),
             "photos": [{"bucket": "listing-photos", "path": "test-0/0.jpg"}],
         })
         price_listing("test-0", ManualComps([{"price": 50.0}]), client)
@@ -979,7 +1116,10 @@ class TestFulfill:
     def test_dry_run_fulfill_pass(self, stub, tmp_artifacts):
         """Fulfill dry-run processes sold listings without advancing."""
         client, _ = stub
-        client.insert_listing({"status": "draft", "title": "Test"})
+        client.insert_listing({
+            "status": "draft", "title": "Test",
+            "appraisal": _high_confidence_appraisal(),
+        })
         price_listing("test-0", ManualComps([{"price": 100.0}]), client)
         _set_category_id(client)
         approve("test-0", weight_oz=5.0, client=client)
@@ -1002,7 +1142,10 @@ class TestFulfill:
     def test_fulfill_advances_to_shipped(self, stub, tmp_artifacts, monkeypatch):
         """Real fulfill pass advances sold → shipped and stores shipping info."""
         client, _ = stub
-        client.insert_listing({"status": "draft", "title": "Test"})
+        client.insert_listing({
+            "status": "draft", "title": "Test",
+            "appraisal": _high_confidence_appraisal(),
+        })
         price_listing("test-0", ManualComps([{"price": 100.0}]), client)
         _set_category_id(client)
         approve("test-0", weight_oz=5.0, client=client)
@@ -1035,3 +1178,12 @@ class TestFulfill:
         with pytest.raises(NotConnected) as exc_info:
             Shippo()
         assert "SHIPPO_API_KEY" in exc_info.value.missing
+
+
+def test_appraisal_confidence_accepts_legacy_keys():
+    """The live skill emits id/value; identification/valuation are aliases."""
+    from antiques.approve import _appraisal_confidence
+    legacy = {"appraisal": {"confidence": {"identification": "high", "valuation": "low"}}}
+    assert _appraisal_confidence(legacy) == ("high", "low")
+    current = {"appraisal": {"confidence": {"id": "high", "value": "high"}}}
+    assert _appraisal_confidence(current) == ("high", "high")

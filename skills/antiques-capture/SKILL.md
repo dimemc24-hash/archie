@@ -103,3 +103,14 @@ and simple.
   which is why capture.py buffers failed uploads to notes immediately.
 - **Never print the Supabase service key.** capture.py reads it from env;
   never echo it in messages or logs.
+
+
+## Appraisal confidence passthrough
+
+The appraisal JSON may carry a `confidence` block —
+`{"id", "value", "basis", "flags"}` with levels `high|medium|low|unknown` — emitted
+by `archie-visual-appraisal`. Pass it through UNTOUCHED inside `--appraisal`; never
+strip or rewrite it. Downstream it is enforcement, not decoration: `approve.py`
+refuses non-high/high listings without an explicit `--ack-low-confidence`, and the
+dashboard Listings tab badges non-high rows. A missing block reads as
+unknown/unknown ("I don't know" beats wrong).

@@ -5,8 +5,11 @@ Host-side module (hermes venv, stdlib only).
 
 ``approve(row_id, weight_oz, dims, price_override=None)``:
   - Validates status is ``priced`` (or ``draft`` with a manual price override).
+  - Confidence guard (council decision ``appraisal-confidence``): if the
+    listing's appraisal lacks high/high confidence, raises
+    ``LowConfidenceError`` unless ``acknowledge_low_confidence=True``.
   - Records approval jsonb (approved_by, approved_at, weight_oz, dims,
-    price_override).
+    price_override, appraisal_confidence, acknowledged_low_confidence).
   - Advances to ``approved``.
   - Writes a **pending-publish marker** to
     ``~/harness/artifacts/antiques/<id>/pending-publish.json`` — keyed to a
@@ -19,9 +22,11 @@ Host-side module (hermes venv, stdlib only).
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +39,63 @@ from antiques.common import IllegalTransition, SupabaseClient, _now_iso, _parse_
 
 HARNESS_DIR = Path.home() / "harness"
 ARTIFACTS_DIR = HARNESS_DIR / "artifacts" / "antiques"
+
+
+# --------------------------------------------------------------------------- #
+# Confidence guard (council decision: appraisal-confidence)
+# --------------------------------------------------------------------------- #
+
+# Confidence is two-dimensional: identification confidence + valuation
+# confidence.  ``HIGH_HIGH`` is the clean path; anything else requires an
+# explicit ``acknowledge_low_confidence=True`` to approve.
+_HIGH = "high"
+_HIGH_HIGH = (_HIGH, _HIGH)
+
+
+class LowConfidenceError(ValueError):
+    """Raised when an appraisal lacks high/high confidence and no ack was given.
+
+    Carries the actual confidence tuple (``identification``, ``valuation``)
+    and the listing id, so the CLI / dashboard can surface exactly what's low
+    and on which listing — Morley prefers 'I don't know' over being wrong, so
+    the guard makes low-confidence state loud and non-default.
+    """
+
+    def __init__(self, listing_id: str, confidence: tuple[str, str]):
+        self.listing_id = listing_id
+        self.confidence = confidence
+        ident, val = confidence
+        super().__init__(
+            f"listing {listing_id} appraisal confidence is "
+            f"identification='{ident}', valuation='{val}' — "
+            f"not high/high. Pass acknowledge_low_confidence=True "
+            f"(CLI: --ack-low-confidence) to approve deliberately."
+        )
+
+
+def _appraisal_confidence(row: dict[str, Any]) -> tuple[str, str] | None:
+    """Extract the (identification, valuation) confidence pair from the
+    appraisal jsonb.
+
+    The appraisal skill produces a ``confidence`` object with ``id`` and
+    ``value`` keys (each ``high`` / ``medium`` / ``low`` / ``unknown``);
+    ``identification`` / ``valuation`` are accepted as legacy aliases.
+    Returns ``None`` if no appraisal or no confidence structure is present —
+    treated as 'unknown' (not high) by the guard.
+    """
+    appraisal = row.get("appraisal")
+    if not isinstance(appraisal, dict):
+        return None
+    conf = appraisal.get("confidence")
+    if not isinstance(conf, dict):
+        return None
+    ident = str(conf.get("id", conf.get("identification", ""))).lower() or "unknown"
+    val = str(conf.get("value", conf.get("valuation", ""))).lower() or "unknown"
+    return (ident, val)
+
+
+def _is_high_confidence(confidence: tuple[str, str] | None) -> bool:
+    return confidence is not None and confidence == _HIGH_HIGH
 
 
 def _marker_dir(listing_id: str) -> Path:
@@ -76,13 +138,20 @@ def approve(
     *,
     price_override: float | None = None,
     approved_by: str = "morley",
+    acknowledge_low_confidence: bool = False,
     client: SupabaseClient | None = None,
 ) -> dict[str, Any]:
     """Approve a listing for publication.
 
     The row must be ``priced`` (or ``draft`` if a ``price_override`` is given —
-    manual pricing at approve time). Advances to ``approved`` and writes the
+    manual pricing at approve times). Advances to ``approved`` and writes the
     pending-publish marker.
+
+    Confidence guard (council decision ``appraisal-confidence``): if the
+    listing's appraisal confidence is not high/high, raises
+    ``LowConfidenceError`` unless ``acknowledge_low_confidence=True``. This
+    forces a conscious step on 'honestly unknown' items — clean high/high
+    items are unaffected.
     """
     client = client or SupabaseClient()
     row = client.get_listing(row_id)
@@ -102,6 +171,16 @@ def approve(
             f"(or 'draft' with price_override)"
         )
 
+    # Confidence guard (council decision: appraisal-confidence).
+    confidence = _appraisal_confidence(row)
+    if not _is_high_confidence(confidence):
+        if not acknowledge_low_confidence:
+            # Use the effective confidence for the message — None means 'no
+            # appraisal / no confidence recorded', surfaced as ('unknown',
+            # 'unknown').
+            effective = confidence or ("unknown", "unknown")
+            raise LowConfidenceError(row_id, effective)
+
     # If price_override given, patch pricing before advancing.
     patch: dict[str, Any] = {}
     if price_override is not None:
@@ -119,6 +198,11 @@ def approve(
         "weight_oz": weight_oz,
         "dims": dims or {},
         "price_override": price_override,
+        "appraisal_confidence": {
+            "id": confidence[0] if confidence else "unknown",
+            "value": confidence[1] if confidence else "unknown",
+        },
+        "acknowledged_low_confidence": bool(acknowledge_low_confidence),
     }
     patch["approval"] = approval
 
@@ -235,11 +319,72 @@ def mark_applied(listing_id: str) -> None:
     mpath.write_text(json.dumps(marker, indent=2))
 
 
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Approve or reject an antiques listing (human gate).",
+    )
+    ap.add_argument("--id", required=True, help="listing row id")
+    ap.add_argument("--weight-oz", type=float, required=True,
+                    help="shipping weight in ounces")
+    ap.add_argument("--dims", default=None,
+                    help='dimensions JSON, e.g. \'{"l":6,"w":4,"h":2}\'')
+    ap.add_argument("--price-override", type=float, default=None,
+                    help="manual price (allows approving a draft)")
+    ap.add_argument("--approved-by", default="morley",
+                    help="approver identity (default: morley)")
+    ap.add_argument("--ack-low-confidence", action="store_true",
+                    help="acknowledge low appraisal confidence and approve "
+                         "deliberately (required when confidence is not "
+                         "high/high)")
+    ap.add_argument("--reject", default=None,
+                    help="reject the listing with the given reason")
+    args = ap.parse_args()
+
+    try:
+        client = SupabaseClient()
+
+        if args.reject:
+            result = reject(args.id, args.reject, client=client)
+            print(json.dumps(result, indent=2, default=str))
+            return 0
+
+        dims = None
+        if args.dims:
+            dims = json.loads(args.dims)
+
+        result = approve(
+            args.id,
+            weight_oz=args.weight_oz,
+            dims=dims,
+            price_override=args.price_override,
+            approved_by=args.approved_by,
+            acknowledge_low_confidence=args.ack_low_confidence,
+            client=client,
+        )
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+    except LowConfidenceError as e:
+        print(f"⚠️  {e}", file=sys.stderr)
+        return 3
+    except (ValueError, IllegalTransition) as e:
+        print(f"❌ {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
 __all__ = [
     "approve",
     "reject",
     "read_marker",
     "validate_marker",
     "mark_applied",
+    "LowConfidenceError",
     "ARTIFACTS_DIR",
 ]
