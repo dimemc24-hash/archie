@@ -1,0 +1,39 @@
+[run_swarm_generic] 2026-07-05T06:25:23+00:00 repo=archie build=build/2026-07-04-operator-console fix=fix/2026-07-04-operator-console routes='' waves=3
+[run_swarm_generic] on fix/2026-07-04-operator-console @ b83ca46
+[run_swarm_generic] config: .swarm.json scope='\.(py)$' deps='none' devsrv='' verify='python3 -m pytest antiques/test_antiques.py -q'
+[run_swarm_generic] changed files:
+  .venv/bin/python
+  .venv/bin/python3
+  .venv/bin/python3.12
+  .venv/lib64
+  .venv/pyvenv.cfg
+  _harness/2026-07-04-operator-console/checkpoint-log.json
+  antiques/approve.py
+  antiques/test_antiques.py
+  dashboard-plugins/listings/dashboard/dist/index.js
+  dashboard-plugins/listings/dashboard/manifest.json
+  dashboard-plugins/listings/dashboard/plugin_api.py
+  dashboard-plugins/test_listings_plugin.py
+[run_swarm_generic] code scope: antiques/approve.py,dashboard-plugins/listings/dashboard/plugin_api.py
+[run_swarm_generic] hivemind_gated=true (checkpoints consulted=2)
+[run_swarm_generic] deps: none (stdlib or no deps step)
+[run_swarm_generic] python3 -u /home/hermes/swarm/peanut_wheel.py --waves 3 --code antiques/approve.py,dashboard-plugins/listings/dashboard/plugin_api.py --findings-out /home/hermes/swarm/archie/_harness/2026-07-04-operator-console/swarm-findings.json (detect-only; gated=true)
+[wheel] DETECT-ONLY: 2 code files, 0 routes; quiesce=3 max_waves=3
+[wheel] wave 1: 0 new findings (total 0), streak=1
+[wheel] wave 2: 0 new findings (total 0), streak=2
+[wheel] wave 3: 7 new findings (total 7), streak=0
+[wheel] DETECTED 7 findings over 3 waves -> /home/hermes/swarm/archie/_harness/2026-07-04-operator-console/swarm-findings.json
+[run_swarm_generic] wheel rc=0
+[run_swarm_generic] findings detected: 7 (raw work-order)
+[run_swarm_generic] triage.py over 7 findings...
+Traceback (most recent call last):
+  File "/home/hermes/swarm/triage.py", line 92, in <module>
+    main()
+  File "/home/hermes/swarm/triage.py", line 35, in main
+    findings = json.load(open(os.path.join(hdir, "swarm-findings.json"))).get("findings", [])
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/hermes/swarm/newchapter/_harness/2026-07-04-operator-console/swarm-findings.json'
+[run_swarm_generic] triage: 0 batches for Archie
+[run_swarm_generic] no report change to commit
+[run_swarm_generic] DONE: fix/2026-07-04-operator-console @ b83ca46 status=success (0 fix commits)
+[run_swarm_generic] sentinel: {"id":"2026-07-04-operator-console","rc":0,"status":"success","fix_sha":"b83ca46","fixes":0}

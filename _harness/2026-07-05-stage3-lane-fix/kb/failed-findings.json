@@ -1,0 +1,94 @@
+{
+  "scope": [
+    "antiques/approve.py",
+    "dashboard-plugins/listings/dashboard/plugin_api.py"
+  ],
+  "routes": [],
+  "waves": 3,
+  "findings": [
+    {
+      "severity": "high",
+      "kind": "authz/IDOR",
+      "title": "saveWiki: no firm-ownership verification \u2014 RLS-only cross-firm write defense",
+      "file": "app/(main)/cases/[caseId]/wiki/actions.ts",
+      "line": 14,
+      "detail": "saveWiki authenticates the user but never verifies that the case belongs to the user's firm before writing wiki_md. The only isolation between firms is RLS \u2014 if RLS were ever misconfigured or a service-role path were introduced, any authenticated user could overwrite any case's wiki.",
+      "suggestedFix": "Add a firm-ownership check after auth, matching the pattern from dashboard-actions.ts ctx(): SELECT firm_id FROM cases WHERE id = caseId, abort if firm_id doesn't match the user's firm.",
+      "confidence": "high",
+      "_persona": "Lurker",
+      "_wave": 3
+    },
+    {
+      "severity": "high",
+      "kind": "authz/IDOR",
+      "title": "toggleTask / deleteTask: operates on raw task id without case-id scoping",
+      "file": "app/(main)/cases/[caseId]/wiki/actions.ts",
+      "line": 31,
+      "detail": "toggleTask(caseId, id, done) updates case_tasks by raw id only \u2014 it never verifies that the task belongs to caseId. An authenticated user who passes any valid task id from a different case (same firm) can toggle/delete it. The caseId parameter is decorative for the revalidatePath only. deleteTask (line 36) has the same gap.",
+      "suggestedFix": "Add .eq('case_id', caseId) to the update/delete query: sb.from('case_tasks').update({done}).eq('id', id).eq('case_id', caseId).",
+      "confidence": "high",
+      "_persona": "Lurker",
+      "_wave": 3
+    },
+    {
+      "severity": "medium",
+      "kind": "secrets-in-errors",
+      "title": "SSN encryption error details leaked to user via redirect URL",
+      "file": "app/(main)/cases/[caseId]/profile/actions.ts",
+      "line": 70,
+      "detail": "When encryptSsn fails, the raw error message (e.message) is interpolated into a redirect URL: reject(`Could not encrypt SSN: ${e.message}`). The encryption module's error could leak details about key state, cipher internals, or environment configuration. The message appears verbatim in the browser address bar.",
+      "suggestedFix": "Log the real error server-side with console.error and return a generic public message: reject('Could not encrypt SSN \u2014 please try again or contact support.').",
+      "confidence": "high",
+      "_persona": "Lurker",
+      "_wave": 3
+    },
+    {
+      "severity": "high",
+      "kind": "authz/IDOR",
+      "title": "saveIncomeChange / saveExpensesChange: no firm-ownership verification on cases table write",
+      "file": "app/(main)/cases/[caseId]/income/actions.ts",
+      "line": 134,
+      "detail": "Both saveIncomeChange (line 134) and saveExpensesChange (expenses/actions.ts line 81) check authentication but write directly to the cases table via eq('id', caseId) without verifying firm ownership. The auth check only validates a session exists \u2014 any authenticated user in any firm can update these fields on any case. RLS is the sole gate. Contrast with dashboard-actions.ts which has a proper ctx() function that reads and checks firm_id first.",
+      "suggestedFix": "Add a firm-ownership guard before the update: SELECT firm_id FROM cases WHERE id = caseId, verify it matches the user's firm (from users table or user metadata), abort if not.",
+      "confidence": "high",
+      "_persona": "Lurker",
+      "_wave": 3
+    },
+    {
+      "severity": "medium",
+      "kind": "authz/IDOR",
+      "title": "forms-preview route missing defense-in-depth firm cross-check present in production route",
+      "file": "app/api/forms-preview/[form]/route.ts",
+      "line": 21,
+      "detail": "The production /api/forms/[form] route (line 46-49) has a defense-in-depth firm-id cross-check beyond RLS: it verifies bundle.case.firm_id === user.firm_id and returns 404 on mismatch. The forms-preview route serves the same sensitive PII (addresses, SSN data on B121) through an identical code path but relies solely on RLS \u2014 it never performs the second firm-verification check.",
+      "suggestedFix": "Add the same defense-in-depth firm cross-check from /api/forms/[form] lines 46-49 to the forms-preview route after fetchCaseBundle.",
+      "confidence": "high",
+      "_persona": "Lurker",
+      "_wave": 3
+    },
+    {
+      "severity": "low",
+      "kind": "secrets-in-errors",
+      "title": "console.error logs internal query error messages that may contain schema details",
+      "file": "app/(main)/cases/[caseId]/income/actions.ts",
+      "line": 93,
+      "detail": "saveIncome logs full Supabase error messages at lines 93, 115, and 122: console.error('[saveIncome] update failed', { caseId, sourceId, error: updErr.message }). While the logged fields are identifiers not secrets, Supabase error messages can include column names, constraint names, and schema structure details that aid reconnaissance. Similar patterns exist in fee actions (fees/actions.ts:31, 37, 66, 106, etc.).",
+      "suggestedFix": "Strip or sanitize the error.details/hint fields before logging; log only the error code and a generic message. Keep the detailed error for the structured-log sidecar if one exists.",
+      "confidence": "medium",
+      "_persona": "Lurker",
+      "_wave": 3
+    },
+    {
+      "severity": "low",
+      "kind": "secrets-in-errors",
+      "title": "Graph API error response body echoed to user in checklist email action",
+      "file": "app/(main)/cases/[caseId]/checklist-actions.ts",
+      "line": 253,
+      "detail": "When sendEmailAndStamp gets a non-202 from Microsoft Graph, it reads the full response body text and returns it to the user: return { error: `Graph sendMail returned ${res.status}: ${text}` }. The Graph error body may contain tenant IDs, request IDs, correlation IDs, and internal Exchange Online metadata.",
+      "suggestedFix": "Log the full Graph response server-side and return a generic error: 'Email send failed \u2014 please try again or contact support.'",
+      "confidence": "medium",
+      "_persona": "Lurker",
+      "_wave": 3
+    }
+  ]
+}
