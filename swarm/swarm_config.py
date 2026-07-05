@@ -335,6 +335,111 @@ def resolve_transport_plan(
     return plan
 
 
+def resolve_repo_cwd(
+    repo_name: str | None,
+    hetzner_repo_path: str = "",
+    swarm_root: str | Path | None = None,
+) -> str:
+    """Resolve the working directory the generic runner must bind for the wheel
+    and triage invocations.
+
+    Root cause of the operator-console false-green: the runner did `cd $REPO`
+    once at startup, but that cwd was not guaranteed when ``peanut_wheel.py``
+    spawned its critic subprocesses — they read files from whatever cwd the
+    process inherited, which resolved to the NextChapter checkout and produced
+    findings about files that do not exist in the archie repo.
+
+    The fix: the runner derives an explicit cwd from the target repo's
+    Hetzner path (``~/swarm/<repo-name>``) and re-binds it immediately before
+    each wheel/triage invocation. This function centralizes that derivation so
+    it is unit-testable host-side (no SSH, no network).
+
+    Args:
+        repo_name: target repo identifier (e.g. "archie", "newchapter").
+        hetzner_repo_path: override from .swarm.json / profile (e.g.
+            "swarm/archie"). When non-empty, it wins over the ``repo_name``
+            derivation so an explicit config path is respected.
+        swarm_root: the ``~/swarm`` directory on the Hetzner box. Defaults to
+            ``$HOME/swarm``; tests inject a temp path.
+
+    Returns:
+        Absolute path to the target repo checkout on the Hetzner box.
+    """
+    swarm_dir = os.path.expanduser(swarm_root or os.path.join("~", "swarm"))
+    rel = hetzner_repo_path or (f"swarm/{repo_name}" if repo_name else "")
+    if not rel:
+        raise ValueError("cannot resolve repo cwd: no repo_name or hetzner_repo_path")
+    # hetzner_repo_path is relative to $HOME (e.g. "swarm/archie") — strip the
+    # leading "swarm/" segment because swarm_dir is already the swarm root.
+    sub = rel.split("/", 1)[1] if rel.startswith("swarm/") else rel
+    return os.path.join(swarm_dir, sub)
+
+
+def derive_triage_findings_path(
+    repo_cwd: str,
+    run_id: str,
+) -> str:
+    """Derive the absolute path to ``swarm-findings.json`` for triage.
+
+    Root cause of the triage crash: the live ``triage.py`` hardcodes
+    ``~/swarm/newchapter`` as the repo root, so for an archie run it looked at
+    ``~/swarm/newchapter/_harness/<id>/swarm-findings.json`` (missing) instead
+    of ``~/swarm/archie/_harness/<id>/swarm-findings.json`` (where the wheel
+    actually wrote it).
+
+    The generic runner passes the repo root to its triage invocation; this
+    function centralizes the findings-path derivation so it is unit-testable.
+    The findings file lives under ``_harness/<id>/`` inside the repo checkout.
+    """
+    return os.path.join(repo_cwd, "_harness", run_id, "swarm-findings.json")
+
+
+def scope_files_exist(repo_cwd: str, code_scope_csv: str) -> tuple[bool, int, list[str]]:
+    """Sanity guard: verify that in-scope files actually exist under the
+    runner's cwd.
+
+    Root cause of the wrong-repo false-green: the runner computed the correct
+    code scope (``antiques/approve.py,...``) but the critic subprocesses ran
+    with a cwd that was NOT the target repo, so those files did not exist
+    relative to cwd. The critics then read whatever files DID exist
+    (NextChapter's) and produced 7 findings about a completely unrelated repo.
+    The run "succeeded" (sentinel rc=0) with zero indication anything was
+    wrong.
+
+    This guard trips BEFORE the wheel runs: if the scope is non-empty but ZERO
+    in-scope files exist under cwd, the runner must FAIL LOUD rather than let
+    critics review an unrelated tree. A run that reviews the wrong repo must
+    never report success.
+
+    Args:
+        repo_cwd: the repo checkout the runner bound as cwd.
+        code_scope_csv: comma-separated relative file paths from the diff
+            (the ``--code`` argument to peanut_wheel.py).
+
+    Returns:
+        (ok, existing_count, missing) where:
+          ok — True if every scoped file exists under repo_cwd (or scope is
+               empty, which is not this guard's concern — the caller handles
+               the empty-scope skip separately).
+          existing_count — how many scoped files exist.
+          missing — list of scoped file paths that do NOT exist.
+    """
+    files = [f for f in code_scope_csv.split(",") if f.strip()]
+    if not files:
+        return True, 0, []
+    existing = 0
+    missing: list[str] = []
+    for rel in files:
+        rel = rel.strip()
+        if not rel:
+            continue
+        if os.path.isfile(os.path.join(repo_cwd, rel)):
+            existing += 1
+        else:
+            missing.append(rel)
+    return existing == len(files), existing, missing
+
+
 def format_plan(plan: TransportPlan) -> str:
     """Format a transport plan as a human-readable string (for --dry-run)."""
     lines = [
@@ -377,5 +482,6 @@ __all__ = [
     "RepoConfig", "ProfileConfig", "TransportPlan",
     "load_profile", "load_repo_config", "load_swarm_config",
     "fallback_repo_config", "resolve_transport_plan", "format_plan",
+    "resolve_repo_cwd", "derive_triage_findings_path", "scope_files_exist",
     "SWARM_CONFIG_VERSION",
 ]

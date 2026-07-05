@@ -418,3 +418,140 @@ def test_format_plan_newchapter(temp_setup):
     assert "\\.(ts|tsx)$" in out
     assert "npm ci" in out
     assert "tsc" in out
+
+
+# ── Tests: resolve_repo_cwd (cwd derivation for the generic runner) ───────────
+
+def test_resolve_repo_cwd_from_repo_name():
+    """resolve_repo_cwd derives ~/swarm/<name> from the repo name."""
+    swarm_root = "/tmp/fake_swarm"
+    cwd = sc.resolve_repo_cwd("archie", swarm_root=swarm_root)
+    assert cwd == os.path.join(swarm_root, "archie")
+
+
+def test_resolve_repo_cwd_from_hetzner_path():
+    """resolve_repo_cwd uses hetzner_repo_path when provided (e.g. swarm/archie)."""
+    swarm_root = "/tmp/fake_swarm"
+    cwd = sc.resolve_repo_cwd("archie", hetzner_repo_path="swarm/archie",
+                              swarm_root=swarm_root)
+    assert cwd == os.path.join(swarm_root, "archie")
+
+
+def test_resolve_repo_cwd_newchapter():
+    """resolve_repo_cwd for newchapter → ~/swarm/newchapter."""
+    swarm_root = "/tmp/fake_swarm"
+    cwd = sc.resolve_repo_cwd("newchapter", hetzner_repo_path="swarm/newchapter",
+                              swarm_root=swarm_root)
+    assert cwd == os.path.join(swarm_root, "newchapter")
+
+
+def test_resolve_repo_cwd_custom_hetzner_path():
+    """resolve_repo_cwd respects a custom hetzner_repo_path that differs from
+    the repo name (e.g. a repo at swarm/custom-location)."""
+    swarm_root = "/tmp/fake_swarm"
+    cwd = sc.resolve_repo_cwd("myrepo", hetzner_repo_path="swarm/custom-location",
+                              swarm_root=swarm_root)
+    assert cwd == os.path.join(swarm_root, "custom-location")
+
+
+def test_resolve_repo_cwd_no_args_raises():
+    """resolve_repo_cwd raises ValueError when neither repo_name nor
+    hetzner_repo_path is provided."""
+    with pytest.raises(ValueError, match="no repo_name or hetzner_repo_path"):
+        sc.resolve_repo_cwd(None, hetzner_repo_path="")
+
+
+def test_resolve_repo_cwd_default_swarm_root():
+    """resolve_repo_cwd defaults to ~/swarm when swarm_root is not given."""
+    cwd = sc.resolve_repo_cwd("archie", hetzner_repo_path="swarm/archie")
+    assert cwd.endswith("swarm/archie")
+
+
+# ── Tests: derive_triage_findings_path ────────────────────────────────────────
+
+def test_derive_triage_findings_path_archie():
+    """derive_triage_findings_path produces the correct path for an archie run."""
+    repo_cwd = "/home/hermes/swarm/archie"
+    path = sc.derive_triage_findings_path(repo_cwd, "2026-07-04-operator-console")
+    assert path == os.path.join(repo_cwd, "_harness", "2026-07-04-operator-console",
+                                "swarm-findings.json")
+
+
+def test_derive_triage_findings_path_newchapter():
+    """derive_triage_findings_path for newchapter → the path the live triage
+    expects (so the generic_triage.py wrapper's HOME+symlink redirect works)."""
+    repo_cwd = "/home/hermes/swarm/newchapter"
+    path = sc.derive_triage_findings_path(repo_cwd, "some-run")
+    assert path == os.path.join(repo_cwd, "_harness", "some-run", "swarm-findings.json")
+
+
+# ── Tests: scope_files_exist (empty-scope sanity guard) ──────────────────────
+
+def test_scope_files_exist_all_present(tmp_path):
+    """scope_files_exist returns ok=True when all scoped files exist."""
+    (tmp_path / "antiques").mkdir()
+    (tmp_path / "antiques" / "approve.py").write_text("# code")
+    (tmp_path / "dashboard-plugins").mkdir(parents=True)
+    (tmp_path / "dashboard-plugins" / "plugin_api.py").write_text("# code")
+    ok, count, missing = sc.scope_files_exist(
+        str(tmp_path), "antiques/approve.py,dashboard-plugins/plugin_api.py")
+    assert ok is True
+    assert count == 2
+    assert missing == []
+
+
+def test_scope_files_exist_none_present(tmp_path):
+    """scope_files_exist returns ok=False, count=0 when NO scoped files exist
+    under cwd — the exact condition that caused the operator-console
+    false-green (critics reviewed an unrelated tree)."""
+    ok, count, missing = sc.scope_files_exist(
+        str(tmp_path), "antiques/approve.py,dashboard-plugins/plugin_api.py")
+    assert ok is False
+    assert count == 0
+    assert "antiques/approve.py" in missing
+    assert "dashboard-plugins/plugin_api.py" in missing
+
+
+def test_scope_files_exist_partial(tmp_path):
+    """scope_files_exist returns ok=False with a partial missing list when
+    only some scoped files exist."""
+    (tmp_path / "antiques").mkdir()
+    (tmp_path / "antiques" / "approve.py").write_text("# code")
+    ok, count, missing = sc.scope_files_exist(
+        str(tmp_path), "antiques/approve.py,antiques/missing.py")
+    assert ok is False
+    assert count == 1
+    assert "antiques/missing.py" in missing
+    assert "antiques/approve.py" not in missing
+
+
+def test_scope_files_exist_empty_scope(tmp_path):
+    """scope_files_exist returns ok=True when the scope is empty — the guard
+    is not concerned with empty scope (the runner handles that separately)."""
+    ok, count, missing = sc.scope_files_exist(str(tmp_path), "")
+    assert ok is True
+    assert count == 0
+    assert missing == []
+
+
+def test_scope_files_exist_whitespace_entries(tmp_path):
+    """scope_files_exist handles whitespace-only and empty CSV entries
+    gracefully."""
+    (tmp_path / "foo.py").write_text("# code")
+    ok, count, missing = sc.scope_files_exist(str(tmp_path), "foo.py, ,")
+    assert ok is True
+    assert count == 1
+
+
+def test_scope_guard_simulates_operator_console_bug(tmp_path):
+    """Reproduce the operator-console failure mode: scope is non-empty but
+    ZERO files exist under cwd (because cwd is the wrong repo). The guard
+    must trip (ok=False, count=0) so the runner fails loud instead of letting
+    critics review an unrelated tree."""
+    # Scope that would be correct for the archie repo, but the cwd (tmp_path)
+    # is an empty dir — simulating the critic running in NextChapter's checkout.
+    scope = "antiques/approve.py,dashboard-plugins/listings/dashboard/plugin_api.py"
+    ok, count, missing = sc.scope_files_exist(str(tmp_path), scope)
+    assert ok is False
+    assert count == 0
+    assert len(missing) == 2

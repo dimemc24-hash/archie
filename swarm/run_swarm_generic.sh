@@ -178,14 +178,51 @@ FIXLOG_OFFSET="$(wc -l < "$SWARM/fix-log.jsonl" 2>/dev/null | tr -d ' ')"; FIXLO
 
 # ── Run the wheel — peanut_wheel commits each accepted fix onto $FIX_BRANCH ──
 # Uses the LIVE peanut_wheel.py (repo-agnostic — it reads cwd = this repo).
+#
+# CWD CONTRACT (root cause of the operator-console false-green): the wheel and
+# its critic subprocesses read in-scope files from their CWD. If the CWD is not
+# the target repo checkout, critics read whatever repo the process happened to
+# inherit (NextChapter) and produce findings about a completely unrelated tree.
+# We bind cwd to $REPO explicitly via a subshell for BOTH the wheel and triage
+# invocations — never relying on the top-level `cd "$REPO"` persisting through
+# intervening subshells / login-shell deps steps.
+#
+# EMPTY-SCOPE SANITY GUARD: if the scope is non-empty but ZERO in-scope files
+# exist under the runner's cwd, FAIL LOUD rather than let critics review an
+# unrelated tree. A run that reviews the wrong repo must never report success.
 WHEEL_RC=0
 if [ -z "$CODE" ] && [ -z "$ROUTES" ]; then
   echo "[run_swarm_generic] no code scope, no routes -> skipping wheel (fix == build)" | tee -a "$LOG"
 else
+  # Sanity guard: verify in-scope files exist under $REPO before running the wheel.
+  if [ -n "$CODE" ]; then
+    MISSING_FILES=""
+    EXISTING_N=0
+    TOTAL_N=0
+    IFS=',' read -ra SCOPE_FILES <<< "$CODE"
+    for rel in "${SCOPE_FILES[@]}"; do
+      [ -z "$rel" ] && continue
+      TOTAL_N=$((TOTAL_N + 1))
+      if [ -f "$REPO/$rel" ]; then
+        EXISTING_N=$((EXISTING_N + 1))
+      else
+        MISSING_FILES="${MISSING_FILES:+$MISSING_FILES, }$rel"
+      fi
+    done
+    if [ "$EXISTING_N" -eq 0 ] && [ "$TOTAL_N" -gt 0 ]; then
+      fail "EMPTY-SCOPE GUARD: $TOTAL_N in-scope files were computed from the diff but NONE exist under '$REPO'. The runner's cwd does not match the target repo checkout — critics would review an unrelated tree. Computed scope: $CODE. Missing: $MISSING_FILES. Aborting to prevent a wrong-repo false-green." 9
+    fi
+    if [ -n "$MISSING_FILES" ]; then
+      echo "[run_swarm_generic] WARN: $EXISTING_N/$TOTAL_N in-scope files exist under '$REPO' — missing: $MISSING_FILES" | tee -a "$LOG"
+    else
+      echo "[run_swarm_generic] scope guard: all $TOTAL_N in-scope files exist under '$REPO'" | tee -a "$LOG"
+    fi
+  fi
+
   ARGS=(--waves "$WAVES"); [ -n "$CODE" ] && ARGS+=(--code "$CODE"); [ -n "$ROUTES" ] && ARGS+=(--routes "$ROUTES")
   ARGS+=(--findings-out "$REPO/_harness/$ID/swarm-findings.json")
   echo "[run_swarm_generic] python3 -u $SWARM/peanut_wheel.py ${ARGS[*]} (detect-only; gated=$HIVEMIND_GATED)" | tee -a "$LOG"
-  python3 -u "$SWARM/peanut_wheel.py" "${ARGS[@]}" 2>&1 | tee -a "$LOG"
+  ( cd "$REPO" && python3 -u "$SWARM/peanut_wheel.py" "${ARGS[@]}" ) 2>&1 | tee -a "$LOG"
   WHEEL_RC="${PIPESTATUS[0]}"
   echo "[run_swarm_generic] wheel rc=$WHEEL_RC" | tee -a "$LOG"
   if [ "$WHEEL_RC" != 0 ]; then STATUS="failed"; RC="$WHEEL_RC"; fi
@@ -193,14 +230,30 @@ fi
 FINDINGS_N="$(python3 -c "import json;print(len(json.load(open('$REPO/_harness/$ID/swarm-findings.json')).get('findings',[])))" 2>/dev/null || echo 0)"
 echo "[run_swarm_generic] findings detected: $FINDINGS_N (raw work-order)" | tee -a "$LOG"
 
-# ── Triage brain (uses the LIVE triage.py — repo-agnostic) ────────────────────
+# ── Triage brain ────────────────────────────────────────────────────────────
+# Uses the repo-tracked generic_triage.py wrapper (shipped from this repo to
+# ~/swarm/generic/), NOT the live ~/swarm/triage.py directly. The live triage.py
+# hardcodes ~/swarm/newchapter as the repo root; for a non-NextChapter repo it
+# would look in the wrong place and crash (or worse, silently miss the findings).
+# The wrapper redirects the live triage.py's hardcoded paths to the correct
+# repo via a HOME override + symlink, and we bind cwd to $REPO here too.
+#
+# The triage exit code is now GATED: if triage crashes (FileNotFoundError or
+# otherwise), the run FAILS instead of silently reporting success with zero
+# batches. This was the second half of the operator-console false-green — the
+# crash was swallowed by `tee` and the runner reported success.
 BATCHES_N=0
 if [ "${FINDINGS_N:-0}" -gt 0 ] 2>/dev/null; then
-  echo "[run_swarm_generic] triage.py over $FINDINGS_N findings..." | tee -a "$LOG"
-  python3 -u "$SWARM/triage.py" "$ID" 2>&1 | tee -a "$LOG"
+  echo "[run_swarm_generic] generic_triage.py over $FINDINGS_N findings (repo_root=$REPO)..." | tee -a "$LOG"
+  ( cd "$REPO" && python3 -u "$GENERIC/generic_triage.py" "$ID" "$REPO" ) 2>&1 | tee -a "$LOG"
+  TRIAGE_RC="${PIPESTATUS[0]}"
+  echo "[run_swarm_generic] triage rc=$TRIAGE_RC" | tee -a "$LOG"
+  if [ "$TRIAGE_RC" != 0 ]; then
+    fail "triage exited $TRIAGE_RC for run_id=$ID repo=$REPO — findings were detected but triage crashed. Refusing to report success." "$TRIAGE_RC"
+  fi
   BATCHES_N="$(python3 -c "import json;print(len(json.load(open('$REPO/_harness/$ID/swarm-workorder.json')).get('batches',[])))" 2>/dev/null || echo 0)"
 fi
-echo "[run_swarm_generic] triage: $BATCHES_N batches for Archie" | tee -a "$LOG"
+echo "[run_swarm_generic] triage: $BATCHES_N batches for $REPO_NAME" | tee -a "$LOG"
 
 # ── Stage-4 handoff artifacts committed onto the fix branch ───────────────────
 # (same JSON shape as the live runner — notify_stage4.sh greps swarm-report.json)
