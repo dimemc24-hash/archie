@@ -137,11 +137,73 @@ on the fix branch. The JSON shape is identical for both repos — it includes a
 | File | Purpose |
 |------|---------|
 | `run_swarm_generic.sh` | Generic swarm runner (profile-driven, repo-tracked) |
-| `swarm_config.py` | Config resolution: profiles + `.swarm.json` + fallback + schema versioning |
+| `generic_triage.py` | Repo-tracked triage wrapper — redirects live triage.py's hardcoded paths to the correct repo (zero NextChapter regression) |
+| `swarm_config.py` | Config resolution: profiles + `.swarm.json` + fallback + schema versioning + cwd/path derivation + scope guard |
 | `swarm-repos/` | Legacy config files (kept for drift/audit tooling; superseded by `.swarm.json`) |
 | `swarm-repos/newchapter.swarm.json.template` | Reference template for the NextChapter `.swarm.json` |
 | `swarm_drift.py` | Drift detector (repo vs live box) — pre-adoption audit tool |
 | `README.md` | This file |
+
+## CWD contract and the empty-scope sanity guard
+
+**BLINDSPOT ADDRESSED — wrong-repo false-green (operator-console build,
+2026-07-04):** the first real generic-runner run "succeeded" (sentinel rc=0)
+but produced garbage: critics reviewed the **NextChapter** repo instead of
+**archie**, and triage crashed looking for findings in the wrong place. Two
+root causes, both fixed in `run_swarm_generic.sh`:
+
+### 1. CWD must be bound to the target repo for the wheel AND triage
+
+The generic runner does `cd "$REPO"` at startup, but that cwd was not
+guaranteed when `peanut_wheel.py` spawned its critic subprocesses — the
+critics read in-scope files (relative paths like `antiques/approve.py`) from
+whatever cwd they inherited, which resolved to the NextChapter checkout. The
+runner now wraps BOTH the wheel and triage invocations in an explicit
+`( cd "$REPO" && ... )` subshell so the cwd is always the target repo
+checkout, regardless of what intervening subshells (e.g. the deps step's
+`bash -lc`) did to the parent shell's cwd.
+
+The cwd derivation is centralized in `swarm_config.resolve_repo_cwd()` so it
+is unit-testable host-side (no SSH, no network).
+
+### 2. Empty-scope sanity guard
+
+Before running the wheel, the runner verifies that the in-scope files
+(computed from the git diff) actually exist under `$REPO`. If the scope is
+non-empty but **zero** in-scope files are found on disk, the runner **FAILS
+LOUD** (non-zero exit, clear log message) rather than letting critics review
+an unrelated tree. This catches the exact failure mode that produced the
+operator-console false-green: the scope was correct on paper but the files
+didn't exist relative to the runner's cwd.
+
+The guard logic is centralized in `swarm_config.scope_files_exist()` (unit-
+testable). The shell runner also has an inline guard so it can abort before
+the wheel process starts.
+
+### 3. Triage path redirection (generic_triage.py)
+
+The live `~/swarm/triage.py` hardcodes `~/swarm/newchapter` as the repo root.
+For a non-NextChapter repo it would look for `swarm-findings.json` in the
+wrong place and crash (as it did in the operator-console run). The
+repo-tracked `swarm/generic_triage.py` wrapper is shipped alongside the
+runner to `~/swarm/generic/` and is invoked as:
+
+```
+generic_triage.py <run_id> <repo_root> [live_triage_path]
+```
+
+It runs the live `triage.py` with `HOME` overridden to a temp dir where
+`swarm/newchapter` is a symlink to `<repo_root>`, so the live script's
+hardcoded `~/swarm/newchapter/...` paths resolve to the correct repo —
+without editing the live script. **Zero NextChapter regression:** the live
+`run_swarm.sh` path never calls this wrapper; it calls `triage.py` directly,
+and when `<repo_root>` IS `~/swarm/newchapter`, the symlink target is the
+NextChapter checkout (identity).
+
+The triage exit code is now **gated**: if triage crashes, the runner FAILS
+instead of reporting success with zero batches. In the operator-console run,
+the `FileNotFoundError` from triage was swallowed by `tee` and the runner
+reported success.
 
 ## How to add the NEXT repo profile
 

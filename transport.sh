@@ -163,6 +163,7 @@ if [ "$RUNNER" = "generic" ]; then
   rsync -az --delete \
     "$SCRIPT_DIR/swarm/run_swarm_generic.sh" \
     "$SCRIPT_DIR/swarm/swarm_config.py" \
+    "$SCRIPT_DIR/swarm/generic_triage.py" \
     "hetzner-swarm:~/swarm/generic/" 2>&1 | tail -1 || abort "rsync generic runner failed" 7
 
   # Bootstrap: init the target repo on Hetzner if it doesn't exist
